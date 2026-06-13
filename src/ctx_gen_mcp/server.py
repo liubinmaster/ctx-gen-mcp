@@ -86,8 +86,9 @@ mcp = FastMCP(
         "Deterministic tools for code context wiki generation. "
         "Call scan_skeleton first to get the module skeleton with domains, tags, "
         "and dependency graph. Use lookup to find relevant modules by keyword/tag. "
-        "Then the Agent generates per-module context JSONs, then validate_coverage, "
-        "then assemble_docs to produce cross-linked wiki pages."
+        "Agent generates per-module context JSONs, then call validate_coverage which "
+        "AUTOMATICALLY assembles wiki MD files (INDEX.md + .wiki.md pages). "
+        "You do NOT need to call assemble_docs separately -- it runs inside validate_coverage."
     ),
 )
 
@@ -568,6 +569,10 @@ def validate_coverage(project_dir: str, ctx_dir: str,
                      check_stale: bool = True) -> dict:
     """Validate that every module has a generated context JSON, and detect stale ones.
 
+    **IMPORTANT**: This tool automatically calls `assemble_docs` if any context
+    JSONs exist, so wiki MD files are always generated. No need to call
+    assemble_docs separately.
+
     Args:
         project_dir: Path to the project root.
         ctx_dir: Path to the ctx/ output directory.
@@ -575,7 +580,8 @@ def validate_coverage(project_dir: str, ctx_dir: str,
 
     Returns:
         Dict with: total_modules, generated, coverage_pct, missing_ids[],
-        stale_ids[], unknown_fields_summary{}.
+        stale_ids[], unknown_fields_summary{}, wiki_auto_generated,
+        wiki_index (path), wiki_modules (count).
     """
     root = Path(project_dir).resolve()
     ctx = Path(ctx_dir)
@@ -600,6 +606,16 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         if u:
             unknown_summary[mid] = u
 
+    # Auto-assemble wiki docs if coverage >= 100% (or >0 modules exist)
+    # This ensures wiki files are always generated -- no need for agent to
+    # call assemble_docs separately.
+    wiki_result = None
+    out_docs_default = str(root / "docs")
+    if generated > 0:
+        wiki_result = assemble_docs(str(root), str(ctx), out_docs_default)
+        if wiki_result.get("errors"):
+            unknown_summary["_wiki_errors"] = wiki_result["errors"]
+
     return {
         "total_modules": total,
         "generated": generated,
@@ -607,6 +623,9 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         "missing_ids": missing,
         "stale_ids": stale,
         "unknown_fields_summary": unknown_summary,
+        "wiki_auto_generated": wiki_result is not None,
+        "wiki_index": wiki_result.get("index_doc", "") if wiki_result else "",
+        "wiki_modules": wiki_result.get("modules_processed", 0) if wiki_result else 0,
     }
 
 
