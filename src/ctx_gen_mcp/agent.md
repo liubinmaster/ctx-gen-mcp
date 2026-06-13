@@ -47,6 +47,9 @@ When the user says "generate context", "create wiki", or "describe codebase":
 
 - NEVER guess a field value -- write `"UNKNOWN"` if uncertain
 - `purpose` field must be >= 30 characters
+- **Every LLM claim must cite a source anchor** (file:line where you found it)
+  - If you cannot find the source line, put the field name in `unknown_fields`
+- **Always set `"verified": false`** -- only humans can review and set it to `true`
 - Always run Stage 3 (validate) before Stage 4 (assemble)
 - If coverage < 100%, retry missing modules automatically (once)
 - Keep `.ctx-cache/` in `.gitignore` -- it's a build artifact

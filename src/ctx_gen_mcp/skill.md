@@ -48,15 +48,47 @@ For **each module** in the skeleton:
   "design_notes": "<architecture decisions, non-obvious constraints>",
   "disclosure_hint": "<what an AI agent MUST know before editing this module>",
   "unknown_fields": ["<list any fields you cannot fill accurately>"],
-  "source_hash": "<from skeleton's content_hash>"
+  "source_hash": "<from skeleton's content_hash>",
+  "verified": false,
+  "source_anchors": {
+    "purpose": ["<entry_file>:<line_range>", "..."],
+    "public_api": {"func_name": "<file>:<line>", "..."},
+    "key_data_structures": {"StructName": "<file>:<line>", "..."},
+    "design_notes": ["<file>:<line_range>", "..."]
+  }
 }
 ```
+
+### Source Anchors (REQUIRED)
+
+**Every LLM-generated claim MUST cite where in the source code you found it.**
+
+- `purpose`: Cite the file and line range where you inferred the module's purpose
+  (e.g., `core_engine.c:15-42` means the module comment or main function header)
+- `public_api`: Cite each function's declaration line
+  (e.g., `{"rule_add": "rule_eval.c:87", "rule_eval": "rule_eval.c:142"}`)
+- `key_data_structures`: Cite each struct/class definition line
+  (e.g., `{"rule_t": "rule_eval.h:23"}`)
+- `design_notes`: Cite the lines where design decisions are evident
+  (e.g., `["pipeline.c:5-12", "pipeline.c:156"]`)
+
+**Why**: Source anchors let AI agents (and humans) verify LLM claims by
+reading the cited lines. Without anchors, descriptions are untrustworthy.
+
+### Verified Flag
+
+- Always set `"verified": false` when generating (you are LLM, not human)
+- A human reviewer will change it to `true` after confirming accuracy
+- The wiki renderer shows `[UNVERIFIED]` badge for `false`, `[VERIFIED]` for `true`
 
 3. **CRITICAL RULES**:
    - If you cannot determine a field, write `"UNKNOWN"` -- do NOT guess
    - `purpose` must be >= 30 characters
    - `public_api` must list actual function/method signatures, not just names
    - `disclosure_hint` is the **most important field** for progressive disclosure
+   - **Every claim must have a source anchor** -- cite `file:line` where you read it
+   - If you cannot find a source line for a claim, put it in `unknown_fields`
+   - Always set `"verified": false` -- only humans can mark it `true`
    - Save each module JSON to `.ctx-cache/ctx/<module_id>.json`
 
 ### Stage 3: Validate (use MCP tool `validate_coverage`)
@@ -111,6 +143,21 @@ get `["policy_engine", "rule_evaluator"]`.
   manual subdivision or a deeper scan with increased `depth`
 
 ## Output Format (Wiki)
+
+Each wiki page has two types of information:
+
+### Deterministic fields (always reliable)
+- YAML front-matter: `id`, `domain`, `tags`, `depends_on`, `used_by`, `language`, `files`, `lines`
+- These come from `scan_skeleton` (glob + regex), never from LLM
+
+### LLM-generated fields (marked with reliability badges)
+- Sections like `Purpose`, `Public API`, `Key Data Structures`, `Design Notes`, `Disclosure Hint`
+- Each section shows `[VERIFIED]` or `[UNVERIFIED]` badge
+- `[UNVERIFIED]` = LLM generated, not yet reviewed by human
+- `[VERIFIED]` = human has confirmed accuracy
+- Source anchors (HTML comments `<!-- source: file:line -->`) let AI trace back
+
+### File structure
 
 ```
 docs/
