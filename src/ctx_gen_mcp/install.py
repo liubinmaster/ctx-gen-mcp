@@ -102,20 +102,28 @@ def _find_mcp_command() -> tuple[str, list[str]]:
 
 
 def configure_mcp(oc_dir: Path):
-    """Add ctx-gen MCP server to opencode.json."""
+    """Add ctx-gen MCP server to opencode.json.
+
+    OpenCode format (NOT Claude Code's mcpServers):
+      - top-level key: "mcp" (not "mcpServers")
+      - "command" is an array (not string + args)
+      - env vars key: "environment" (not "env")
+      - required: "type": "local"
+    """
     cfg = read_opencode_json(oc_dir)
     cmd, args = _find_mcp_command()
 
+    # OpenCode "mcp" format: command is a single array
     mcp_entry = {
-        "command": cmd,
-        "args": args,
-        "env": {},
-        "description": "Code context description generator -- deterministic tools for progressive docs",
+        "type": "local",
+        "command": [cmd] + args,
+        "environment": {},
+        "enabled": True,
     }
 
-    if "mcpServers" not in cfg:
-        cfg["mcpServers"] = {}
-    cfg["mcpServers"]["ctx-gen"] = mcp_entry
+    if "mcp" not in cfg:
+        cfg["mcp"] = {}
+    cfg["mcp"]["ctx-gen"] = mcp_entry
 
     # Also add skill permission
     if "permission" not in cfg:
@@ -169,8 +177,8 @@ def uninstall(oc_dir: Path, project_dir: Path):
 
     cfg = read_opencode_json(oc_dir)
     changed = False
-    if "mcpServers" in cfg and "ctx-gen" in cfg["mcpServers"]:
-        del cfg["mcpServers"]["ctx-gen"]
+    if "mcp" in cfg and "ctx-gen" in cfg["mcp"]:
+        del cfg["mcp"]["ctx-gen"]
         changed = True
     if changed:
         write_opencode_json(oc_dir, cfg)
