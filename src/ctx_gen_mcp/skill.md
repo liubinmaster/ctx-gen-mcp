@@ -97,13 +97,17 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
 3. If `stale_ids` is non-empty, regenerate those modules
 4. If `unknown_fields_summary` is non-empty, flag for manual review in output
 
-### Stage 4: Assemble (use MCP tool `assemble_docs`)
+### Stage 4: Assemble (MANDATORY -- use MCP tool `assemble_docs`)
+
+**NEVER use `write_file` to create wiki MD files. Only `assemble_docs` can produce them.**
+
 1. Call `assemble_docs` with `project_dir`, `ctx_dir=".ctx-cache/ctx"`,
    `out_docs="./docs"`
 2. This produces wiki-style output:
    - `docs/wiki/INDEX.md` -- single entry point (~50-100 lines)
    - `docs/wiki/domains/<domain>/<module>.wiki.md` -- cross-linked pages
-3. Report the final coverage percentage
+3. **Verify**: Confirm `docs/wiki/INDEX.md` exists. If not, `assemble_docs` failed -- check errors.
+4. Report the final coverage percentage
 
 ## Navigating the Wiki (for AI agents using the output)
 

@@ -43,6 +43,14 @@ When the user says "generate context", "create wiki", or "describe codebase":
 4. **Assemble**: Call `assemble_docs(project_dir=".", ctx_dir=".ctx-cache/ctx", out_docs="./docs")`
 5. **Report**: Coverage %, domain breakdown, and path to `docs/wiki/INDEX.md`.
 
+## CRITICAL: Output File Rules
+
+**NEVER use `write_file` to create any `.md` file under `docs/` directory.**
+**ALL wiki-style MD output MUST come from `assemble_docs` MCP tool ONLY.**
+- The ONLY files you may write are: `.ctx-cache/skeleton.json` and `.ctx-cache/ctx/*.json`
+- If you write any `.md` file directly, the wiki cross-links, INDEX, verified badges,
+  and source anchors will be MISSING or BROKEN.
+
 ## Rules
 
 - NEVER guess a field value -- write `"UNKNOWN"` if uncertain
@@ -51,6 +59,7 @@ When the user says "generate context", "create wiki", or "describe codebase":
   - If you cannot find the source line, put the field name in `unknown_fields`
 - **Always set `"verified": false`** -- only humans can review and set it to `true`
 - Always run Stage 3 (validate) before Stage 4 (assemble)
+- **Stage 4 (`assemble_docs`) is MANDATORY -- never skip it**
 - If coverage < 100%, retry missing modules automatically (once)
 - Keep `.ctx-cache/` in `.gitignore` -- it's a build artifact
 - For large domains (>10 modules), note it in the report for potential subdivision
