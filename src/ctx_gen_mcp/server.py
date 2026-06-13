@@ -1,9 +1,14 @@
-"""ctx_gen_mcp/server.py — MCP Server with 3 deterministic tools.
+"""ctx_gen_mcp/server.py -- MCP Server with 4 deterministic tools.
 
 Tools:
-  scan_skeleton   — deterministic repo scan (no LLM)
-  validate_coverage — programatic coverage check + stale detection
-  assemble_docs    — merge all module JSONs into progressive MD docs
+  scan_skeleton    -- deterministic repo scan with domain grouping, tags, deps (no LLM)
+  lookup           -- find modules by tag/domain/keyword
+  validate_coverage -- programmatic coverage check + stale detection
+  assemble_docs     -- merge all module JSONs into wiki-style MD docs
+
+Output (wiki format):
+  docs/wiki/INDEX.md           -- single entry point (~50 lines)
+  docs/wiki/domains/<domain>/*.wiki.md  -- cross-linked per-module wiki pages
 
 Usage (stdio transport, for OpenCode MCP config):
   python -m ctx_gen_mcp.server
@@ -15,14 +20,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-# ── Constants ────────────────────────────────────────────────────────────────
-DEFAULT_CODECCIES = {
+# -- Constants ----------------------------------------------------------------
+
+DEFAULT_CODE_EXTS = {
     ".py", ".pyx", ".pyi",
     ".js", ".ts", ".jsx", ".tsx",
     ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".inl",
@@ -32,22 +40,65 @@ DEFAULT_CODECCIES = {
 }
 MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB
 
+# Tag keyword maps for automatic inference
+_ARCH_KEYWORDS = {
+    "kernel": ["kernel", "driver_", "minifilter", "irp", "wdm", "ntoskrnl",
+               "driverentry", "deviceiocontrol", "zwcreate", "psset"],
+    "user-mode": ["win32", "winapi", "user32", "kernel32", "getprocaddress",
+                  "createmutex", "virtualalloc", "createthread"],
+    "shared-lib": ["__declspec", "dllexport", "dllmain", "so_init", "shared"],
+}
+_TECH_KEYWORDS = {
+    "driver": ["driver", "filter", "deviceobject", "driverobject", "fltregister"],
+    "crypto": ["crypto", "cipher", "encrypt", "decrypt", "aes", "rsa", "sha256",
+               "sqlcipher", "openssl", "bcrypt", "hmac"],
+    "network": ["socket", "http", "tcp", "udp", "listen", "connect", "bind",
+                "wsa", "winsock", "ssl", "tls", "curl"],
+    "async": ["async", "await", "future", "promise", "callback", "iocp",
+              "epoll", "select", "completionport"],
+    "ipc": ["pipe", "namedpipe", "rpc", "lpc", "alc", "message", "shm",
+            "sharedmem", "mailbox", "dbus"],
+}
+_BUILD_FILES = {"CMakeLists.txt", "Makefile", "makefile", "*.sln", "*.vcxproj",
+                "build.gradle", "Cargo.toml", "package.json", "setup.py",
+                "pyproject.toml", "go.mod"}
+
+# Include/import patterns for shallow dependency detection
+_INCLUDE_PATTERNS = [
+    # C/C++
+    re.compile(r'#\s*include\s+[<"]([^>"]+)[>"]', re.IGNORECASE),
+    re.compile(r'#\s*import\s+[<"]([^>"]+)[>"]', re.IGNORECASE),
+    # Python
+    re.compile(r'^(?:from|import)\s+([\w.]+)', re.MULTILINE),
+    # JS/TS
+    re.compile(r'(?:import|require)\s*\(?[\'"]([^\'"]+)[\'"]', re.IGNORECASE),
+    # Go
+    re.compile(r'import\s+"([^"]+)"'),
+    # Rust
+    re.compile(r'use\s+([\w:]+)::'),
+    # Java/C#
+    re.compile(r'import\s+([\w.]+)', re.IGNORECASE),
+]
+
 mcp = FastMCP(
     name="ctx-gen",
     instructions=(
-        "Deterministic tools for code context description generation. "
-        "Call scan_skeleton first, then generate per-module descriptions (done by the Agent), "
-        "then validate_coverage, then assemble_docs."
+        "Deterministic tools for code context wiki generation. "
+        "Call scan_skeleton first to get the module skeleton with domains, tags, "
+        "and dependency graph. Use lookup to find relevant modules by keyword/tag. "
+        "Then the Agent generates per-module context JSONs, then validate_coverage, "
+        "then assemble_docs to produce cross-linked wiki pages."
     ),
 )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
 def _detect_language(ext: str) -> str:
     return {
         ".py": "python", ".pyx": "python", ".pyi": "python",
-        ".js": "javascript", ".ts": "typescript", ".jsx": "javascript", ".tsx": "typescript",
+        ".js": "javascript", ".ts": "typescript", ".jsx": "javascript",
+        ".tsx": "typescript",
         ".c": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
         ".h": "c", ".hpp": "cpp", ".hh": "cpp", ".inl": "cpp",
         ".go": "go", ".rs": "rust", ".java": "java",
@@ -71,7 +122,7 @@ def _find_entry(files: list[str]) -> str | None:
 
 
 def _read_file(path: Path) -> str:
-    for enc in ("utf-8", "latin-1"):
+    for enc in ("utf-8", "latin-1", "gbk"):
         try:
             return path.read_text(encoding=enc)
         except Exception:
@@ -92,27 +143,18 @@ def _walk_dir(root: Path, code_only: bool) -> list[Path]:
         if child.name.startswith(".") or child.name in (
             "node_modules", "__pycache__", "venv", ".venv",
             "build", "dist", "target", ".git", ".hg", ".svn",
+            "egg-info", ".eggs", ".tox",
         ):
             continue
         if child.is_dir():
             results.extend(_walk_dir(child, code_only))
         elif child.is_file():
-            if code_only and child.suffix not in DEFAULT_CODECCIES:
+            if code_only and child.suffix not in DEFAULT_CODE_EXTS:
                 continue
             if child.stat().st_size > MAX_FILE_SIZE:
                 continue
             results.append(child)
     return results
-
-
-def _make_output_dirs(project_root: str, out_dir: str) -> tuple[Path, Path, Path]:
-    out = Path(out_dir)
-    ctx_dir = out / "ctx"
-    docs_dir = out / "docs"
-    modules_dir = docs_dir / "modules"
-    ctx_dir.mkdir(parents=True, exist_ok=True)
-    modules_dir.mkdir(parents=True, exist_ok=True)
-    return ctx_dir, docs_dir, modules_dir
 
 
 def _list_existing_contexts(ctx_dir: Path) -> dict[str, dict]:
@@ -135,24 +177,199 @@ def _compute_file_hash(path: Path) -> str:
         return ""
 
 
-# ── Tools ────────────────────────────────────────────────────────────────────
+# -- Tag Inference -----------------------------------------------------------
 
-def _scan_repo(root: Path, depth: int = 2, code_only: bool = True) -> dict:
-    """Core scanning logic (not an MCP tool). Returns skeleton dict."""
+def _infer_tags(root: Path, module_path: str,
+                files: list[Path]) -> list[str]:
+    """Infer tags from file names, directory names, and shallow content scan."""
+    tags: list[str] = set()
+    mod_dir = root / module_path
+
+    # Language tag
+    lang_counter: Counter = Counter()
+    for f in files:
+        lang_counter[_detect_language(f.suffix)] += 1
+    if lang_counter:
+        top_lang = lang_counter.most_common(1)[0][0]
+        if top_lang != "unknown":
+            tags.add(top_lang)
+
+    # Architecture tags (from filenames + shallow content)
+    all_content_parts: list[str] = []
+    for f in files[:20]:  # limit to 20 files for performance
+        content = _read_file(f)
+        # Use filename first
+        fname = f.stem.lower()
+        for tag, keywords in _ARCH_KEYWORDS.items():
+            for kw in keywords:
+                if kw.lower() in fname:
+                    tags.add(tag)
+                    break
+        # Then content (first 500 chars)
+        all_content_parts.append(content[:500])
+
+    combined = " ".join(all_content_parts).lower()
+    for tag, keywords in _ARCH_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in combined:
+                tags.add(tag)
+                break
+
+    # Tech feature tags
+    for f in files[:20]:
+        fname = f.stem.lower()
+        for tag, keywords in _TECH_KEYWORDS.items():
+            for kw in keywords:
+                if kw.lower() in fname:
+                    tags.add(tag)
+                    break
+    for tag, keywords in _TECH_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in combined:
+                tags.add(tag)
+                break
+
+    # Build target detection from build system files
+    parent_build = _detect_build_targets(root, module_path)
+    for bt in parent_build:
+        tags.add(bt)
+
+    return sorted(tags)
+
+
+def _detect_build_targets(root: Path, module_path: str) -> list[str]:
+    """Detect build target type from build system files in or near the module."""
+    targets: list[str] = []
+    mod_dir = root / module_path
+
+    for pattern in _BUILD_FILES:
+        from pathlib import PurePosixPath
+        p = PurePosixPath(pattern)
+        matches = list(mod_dir.glob(p.name)) + list(mod_dir.glob(pattern))
+        for bf in matches[:3]:
+            content = _read_file(bf).lower()
+            if "add_library" in content and ("shared" in content or "SHARED" in content):
+                targets.append("shared-lib")
+            elif "add_library" in content:
+                targets.append("static-lib")
+            elif "add_executable" in content or "target_link_libraries" in content:
+                targets.append("exe")
+            elif ".sln" in str(bf) or ".vcxproj" in str(bf):
+                targets.append("visual-studio")
+            elif "cargo.toml" in str(bf).lower():
+                targets.append("rust-lib")
+            elif "go.mod" in str(bf).lower():
+                targets.append("go-mod")
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for t in targets:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result if result else ["unknown-build"]
+
+
+# -- Shallow Dependency Detection --------------------------------------------
+
+def _detect_dependencies(root: Path, module_path: str,
+                         all_modules: dict[str, str],
+                         files: list[Path]) -> dict[str, str]:
+    """Shallow dependency detection via import/include pattern matching.
+
+    Returns dict mapping dependent module_id -> relationship type.
+    """
+    deps: dict[str, str] = {}
+    mod_dir = root / module_path
+    other_ids = set(all_modules.keys()) - {module_path}
+
+    # Build a map: directory name -> module_id for matching
+    dir_to_module: dict[str, str] = {}
+    for mid in other_ids:
+        dir_to_module[Path(mid).name.lower()] = mid
+        # Also map parent segments
+        for part in Path(mid).parts:
+            dir_to_module[part.lower()] = mid
+
+    include_set: set[str] = set()
+
+    for f in files[:30]:
+        content = _read_file(f)
+        for pattern in _INCLUDE_PATTERNS:
+            for match in pattern.finditer(content):
+                ref = match.group(1).lower().strip()
+                # Strip file extensions and path prefixes
+                ref_stem = Path(ref).stem.lower()
+                # Check against other module names
+                if ref_stem in dir_to_module:
+                    include_set.add(dir_to_module[ref_stem])
+                # Also check if the full ref matches
+                for mid in other_ids:
+                    if mid.lower() in ref or ref in mid.lower():
+                        include_set.add(mid)
+
+    for mid in include_set:
+        deps[mid] = "imports"
+
+    return deps
+
+
+# -- Domain Grouping ----------------------------------------------------------
+
+def _assign_domains(modules: list[dict]) -> list[dict]:
+    """Assign domains to modules based on directory hierarchy.
+
+    Strategy: Use the immediate parent directory name as the domain.
+    Modules directly in root get assigned to '_root'.
+    If any domain has >10 modules, mark it for potential LLM subdivide
+    (the Agent can handle this later).
+    """
+    domain_map: dict[str, list[dict]] = {}
+    large_domains: list[str] = []
+
+    for mod in modules:
+        mod_id = mod["id"]
+        parts = Path(mod_id).parts
+        if len(parts) >= 2:
+            # Use the first directory segment as domain
+            domain = parts[0]
+        else:
+            domain = "_root"
+        mod["domain"] = domain
+        domain_map.setdefault(domain, []).append(mod)
+
+    # Check for large domains (>10 modules)
+    for domain, mods in domain_map.items():
+        if len(mods) > 10:
+            large_domains.append(domain)
+
+    # Sort domains alphabetically
+    for mod in modules:
+        pass  # domain already assigned
+
+    return modules, large_domains
+
+
+# -- Core Scan ----------------------------------------------------------------
+
+def _scan_repo(root: Path, depth: int = 2,
+               code_only: bool = True) -> dict:
+    """Core scanning logic. Returns skeleton with domains, tags, dependencies."""
     if not root.is_dir():
         return {"error": f"Not a directory: {root}"}
 
     all_files = _walk_dir(root, code_only=code_only)
     exts = {f.suffix for f in all_files}
-    languages = {_detect_language(f.suffix) for f in all_files}
+    languages = {_detect_language(f.suffix) for f in all_files if _detect_language(f.suffix) != "unknown"}
     total_lines = sum(_count_lines(f) for f in all_files)
 
     modules: list[dict] = []
     max_depth = max((len(f.relative_to(root).parts) for f in all_files), default=0)
 
-    # Flat: all code files are directly in the root (max_depth == 1)
-    # Hierarchical: code files are in subdirectories (max_depth >= 2)
     if max_depth <= 1 or depth <= 0:
+        # Flat project: all files in root
+        all_content = "".join(_read_file(f) for f in all_files[:50])
         modules.append({
             "id": root.name or "root",
             "path": ".",
@@ -161,9 +378,7 @@ def _scan_repo(root: Path, depth: int = 2, code_only: bool = True) -> dict:
             "language": next(iter(languages), "unknown"),
             "total_lines": total_lines,
             "entry": _find_entry([f.name for f in all_files]),
-            "content_hash": hashlib.md5("".join(
-                _read_file(f) for f in all_files[:50]
-            ).encode()).hexdigest()[:12],
+            "content_hash": hashlib.md5(all_content.encode()).hexdigest()[:12],
         })
     else:
         seen: set[str] = set()
@@ -193,6 +408,38 @@ def _scan_repo(root: Path, depth: int = 2, code_only: bool = True) -> dict:
                 "content_hash": hashlib.md5("".join(hash_parts).encode()).hexdigest()[:12],
             })
 
+    # Module id -> path map for dependency detection
+    module_map = {m["id"]: m["path"] for m in modules}
+
+    # Enrich each module with tags and dependencies
+    for mod in modules:
+        mod_files = [root / f for f in mod["files"]]
+        mod["tags"] = _infer_tags(root, mod["path"], mod_files)
+        mod["dependencies"] = _detect_dependencies(root, mod["path"], module_map, mod_files)
+
+    # Assign domains
+    modules, large_domains = _assign_domains(modules)
+
+    # Build domain summary
+    domain_summary: dict[str, dict] = {}
+    for mod in modules:
+        d = mod["domain"]
+        if d not in domain_summary:
+            domain_summary[d] = {
+                "module_count": 0,
+                "total_lines": 0,
+                "languages": [],
+                "tags": [],
+            }
+        domain_summary[d]["module_count"] += 1
+        domain_summary[d]["total_lines"] += mod["total_lines"]
+        for t in mod.get("tags", []):
+            if t not in domain_summary[d]["tags"]:
+                domain_summary[d]["tags"].append(t)
+        lang = mod.get("language", "unknown")
+        if lang not in domain_summary[d]["languages"]:
+            domain_summary[d]["languages"].append(lang)
+
     return {
         "root_path": str(root),
         "total_modules": len(modules),
@@ -201,12 +448,18 @@ def _scan_repo(root: Path, depth: int = 2, code_only: bool = True) -> dict:
         "languages": sorted(languages),
         "extensions": sorted(exts),
         "modules": modules,
+        "domains": domain_summary,
+        "large_domains": large_domains,
     }
 
 
+# -- MCP Tools ----------------------------------------------------------------
+
 @mcp.tool()
-def scan_skeleton(project_dir: str, depth: int = 2, code_only: bool = True) -> dict:
-    """Scan a code repository and return a deterministic module skeleton.
+def scan_skeleton(project_dir: str, depth: int = 2,
+                  code_only: bool = True) -> dict:
+    """Scan a code repository and return a deterministic module skeleton
+    with domain grouping, tags, and dependency graph.
 
     Args:
         project_dir: Absolute path to the project root directory.
@@ -214,14 +467,105 @@ def scan_skeleton(project_dir: str, depth: int = 2, code_only: bool = True) -> d
         code_only: If True, only include code files (default True).
 
     Returns:
-        A dict with: root_path, total_modules, total_files, total_lines, modules[].
+        A dict with: root_path, total_modules, total_files, total_lines,
+        languages, extensions, modules[] (each with domain, tags,
+        dependencies), domains{} (summary per domain),
+        large_domains[] (domains with >10 modules needing subdivision).
     """
     root = Path(project_dir).resolve()
     return _scan_repo(root, depth=depth, code_only=code_only)
 
 
 @mcp.tool()
-def validate_coverage(project_dir: str, ctx_dir: str, check_stale: bool = True) -> dict:
+def lookup(skeleton_json: str, query: str,
+            lookup_type: str = "auto") -> dict:
+    """Find relevant modules by tag, domain, or keyword.
+
+    Use this tool to quickly locate which modules an AI agent should
+    read, without scanning the entire INDEX.
+
+    Args:
+        skeleton_json: The skeleton JSON string (from scan_skeleton output).
+        query: Search query -- a tag name, domain name, keyword, or module id.
+        lookup_type: One of "auto", "tag", "domain", "keyword", "id".
+            "auto" tries all strategies and returns the best match.
+
+    Returns:
+        Dict with: matched_ids[], match_reason, matched_domains[].
+    """
+    try:
+        skeleton = json.loads(skeleton_json) if isinstance(skeleton_json, str) else skeleton_json
+    except json.JSONDecodeError:
+        return {"error": "Invalid skeleton JSON", "matched_ids": []}
+
+    modules = skeleton.get("modules", [])
+    domains = skeleton.get("domains", {})
+    q_lower = query.strip().lower()
+
+    if not q_lower:
+        return {"matched_ids": [], "match_reason": "empty query"}
+
+    matched_ids: list[str] = []
+    matched_domains: list[str] = []
+    reason: str = ""
+
+    if lookup_type in ("auto", "id"):
+        # Exact module id match
+        for m in modules:
+            if m["id"].lower() == q_lower:
+                matched_ids.append(m["id"])
+                reason = f"exact module id match: {m['id']}"
+                return {"matched_ids": matched_ids, "match_reason": reason,
+                        "matched_domains": [m.get("domain", "")]}
+
+    if lookup_type in ("auto", "domain"):
+        # Domain match
+        for d_name in domains:
+            if q_lower in d_name.lower():
+                matched_domains.append(d_name)
+                for m in modules:
+                    if m.get("domain") == d_name:
+                        matched_ids.append(m["id"])
+                reason = f"domain match: {d_name}"
+                if matched_ids:
+                    return {"matched_ids": matched_ids, "match_reason": reason,
+                            "matched_domains": matched_domains}
+
+    if lookup_type in ("auto", "tag"):
+        # Tag match
+        for m in modules:
+            tags = m.get("tags", [])
+            for t in tags:
+                if q_lower in t.lower():
+                    if m["id"] not in matched_ids:
+                        matched_ids.append(m["id"])
+                    reason = f"tag match: {query}"
+                    break
+
+    if lookup_type in ("auto", "keyword"):
+        # Keyword match against module id and files
+        if not matched_ids:
+            for m in modules:
+                mid = m["id"].lower()
+                files_str = " ".join(m.get("files", [])).lower()
+                if q_lower in mid or q_lower in files_str:
+                    if m["id"] not in matched_ids:
+                        matched_ids.append(m["id"])
+                reason = f"keyword match: {query}"
+
+    if not matched_ids and not reason:
+        reason = "no matches found"
+
+    return {
+        "matched_ids": matched_ids,
+        "match_reason": reason or "no matches found",
+        "matched_domains": matched_domains,
+    }
+
+
+@mcp.tool()
+def validate_coverage(project_dir: str, ctx_dir: str,
+                     check_stale: bool = True) -> dict:
     """Validate that every module has a generated context JSON, and detect stale ones.
 
     Args:
@@ -248,12 +592,10 @@ def validate_coverage(project_dir: str, ctx_dir: str, check_stale: bool = True) 
     unknown_summary: dict[str, list[str]] = {}
 
     for mid, data in existing.items():
-        # Check stale
         if check_stale and mid in modules:
             mod = modules[mid]
             if mod.get("content_hash") != data.get("source_hash", ""):
                 stale.append(mid)
-        # Check unknown fields
         u = data.get("unknown_fields", [])
         if u:
             unknown_summary[mid] = u
@@ -269,8 +611,10 @@ def validate_coverage(project_dir: str, ctx_dir: str, check_stale: bool = True) 
 
 
 @mcp.tool()
-def assemble_docs(project_dir: str, ctx_dir: str, out_docs: str, project_name: str = "") -> dict:
-    """Assemble all per-module JSON context files into progressive-disclosure MD docs.
+def assemble_docs(project_dir: str, ctx_dir: str,
+                  out_docs: str, project_name: str = "") -> dict:
+    """Assemble all per-module JSON context files into wiki-style MD docs
+    with cross-links, domain grouping, and navigable INDEX.
 
     Args:
         project_dir: Path to the project root.
@@ -279,105 +623,223 @@ def assemble_docs(project_dir: str, ctx_dir: str, out_docs: str, project_name: s
         project_name: Optional project name (default: inferred from project_dir).
 
     Returns:
-        Dict with: main_doc, module_docs[], errors[].
+        Dict with: index_doc, module_docs[], domain_dirs[], errors[].
     """
     root = Path(project_dir).resolve()
     ctx = Path(ctx_dir)
     docs = Path(out_docs)
-    modules_dir = docs / "modules"
+    wiki_dir = docs / "wiki"
+    domains_dir = wiki_dir / "domains"
     ctx.mkdir(parents=True, exist_ok=True)
-    modules_dir.mkdir(parents=True, exist_ok=True)
+    domains_dir.mkdir(parents=True, exist_ok=True)
 
     name = project_name or root.name or "Project"
     existing = _list_existing_contexts(ctx)
-    modules = sorted(existing.values(), key=lambda x: x.get("purpose", ""))
+
+    # Re-scan to get domain/tag info
+    skeleton = _scan_repo(root, depth=2, code_only=True)
+    all_modules = {m["id"]: m for m in skeleton.get("modules", [])}
+    domain_summary = skeleton.get("domains", {})
 
     errors: list[str] = []
     module_docs: list[str] = []
+    domain_dirs: list[str] = []
 
-    # L0 + L1 + L3: main doc
-    lines: list[str] = []
-    lines.append(f"# {name} — Code Context Reference\n")
-    lines.append("> Progressive-disclosure context for AI coding agents.")
-    lines.append("> Read L0 first, then L1 to find the right module, then open the L2 link.\n")
+    # --- Generate per-module wiki pages ---
+    for mod in skeleton.get("modules", []):
+        mid = mod["id"]
+        domain = mod.get("domain", "_root")
+        ctx_data = existing.get(mid, {})
+        tags = mod.get("tags", [])
+        deps = mod.get("dependencies", {})
+        used_by = {m["id"]: "imports" for m in skeleton.get("modules", [])
+                   if mid in m.get("dependencies", {})}
 
-    # L0: One-liner
-    lines.append("## [L0] What This Project Does\n")
-    lines.append(f"> {name} — context description not yet generated. "
-                "Run the ctx-gen agent to populate this section.\n")
+        # Create domain subdirectory
+        dom_dir = domains_dir / domain
+        dom_dir.mkdir(parents=True, exist_ok=True)
+        if domain not in domain_dirs:
+            domain_dirs.append(domain)
 
-    # L1: Module map
-    lines.append("## [L1] Module Map\n")
-    lines.append("| Module | Language | Files | Lines | Entry | Purpose |")
-    lines.append("|---------|----------|-------|-------|-------|---------|")
-    for m in modules:
-        mid = m.get("module_id", "unknown")
-        lang = m.get("language", "?")
-        purpose = (m.get("purpose") or "?")[:60]
-        entry = m.get("entry", "-")
-        # Count files from source
-        nfiles = len(m.get("dependencies", []))  # placeholder
-        nlines = 0
-        lines.append(f"| [{mid}](./modules/{mid}.md) | {lang} | ? | ? | {entry} | {purpose} |")
-    lines.append("")
+        # Build wiki page
+        lines: list[str] = []
 
-    # L3: Key decisions
-    lines.append("## [L3] Key Design Decisions\n")
-    adrs = [m for m in modules if m.get("design_notes")]
-    if adrs:
-        for m in adrs:
-            lines.append(f"### {m.get('module_id')}")
-            lines.append(f"{m.get('design_notes', '')}\n")
+        # YAML front matter
+        lines.append("---")
+        lines.append(f"id: {mid}")
+        lines.append(f"domain: {domain}")
+        lines.append(f"tags: [{', '.join(tags)}]")
+        lines.append(f"depends_on: [{', '.join(deps.keys())}]")
+        lines.append(f"used_by: [{', '.join(used_by.keys())}]")
+        lines.append(f"language: {mod.get('language', 'unknown')}")
+        lines.append(f"files: {mod.get('file_count', 0)}")
+        lines.append(f"lines: {mod.get('total_lines', 0)}")
+        lines.append(f"entry: {mod.get('entry', '-')}")
+        lines.append("---")
+        lines.append("")
+
+        # L0: One-liner (AI decides in 5 seconds if relevant)
+        purpose = ctx_data.get("purpose", "(context not yet generated)")
+        lines.append(f"# {mid} -- {purpose}")
+        lines.append("")
+
+        # L1: Summary (AI decides whether to read deeper)
+        lines.append("## Summary")
+        lines.append(f"**Domain**: `{domain}` | "
+                     f"**Language**: {mod.get('language', '?')} | "
+                     f"**Size**: {mod.get('file_count', 0)} files, "
+                     f"{mod.get('total_lines', 0)} lines")
+        if tags:
+            lines.append(f"**Tags**: {', '.join(f'`{t}`' for t in tags)}")
+        lines.append("")
+
+        # Cross-link navigation
+        nav_parts: list[str] = []
+        if deps:
+            dep_links = [f"[{d}](../{dep_domain(d, skeleton)}/{d}.wiki.md)"
+                        for d in deps]
+            nav_parts.append("Depends: " + ", ".join(dep_links))
+        if used_by:
+            ub_links = [f"[{u}](../{dep_domain(u, skeleton)}/{u}.wiki.md)"
+                        for u in used_by]
+            nav_parts.append("Used by: " + ", ".join(ub_links))
+        if nav_parts:
+            lines.append(" | ".join(nav_parts))
+            lines.append("")
+
+        # L2: Detailed content (read on demand)
+        lines.append("---")
+        lines.append("## Purpose")
+        lines.append(ctx_data.get("purpose",
+                                  "*Run ctx-gen agent to generate.*"))
+        lines.append("")
+
+        lines.append("## Public API")
+        pub_api = ctx_data.get("public_api", [])
+        if pub_api:
+            for fn in pub_api:
+                lines.append(f"- `{fn}`")
+        else:
+            lines.append("*Not yet generated.*")
+        lines.append("")
+
+        lines.append("## Key Data Structures")
+        kds = ctx_data.get("key_data_structures", [])
+        if kds:
+            for ds in kds:
+                lines.append(f"### {ds.get('name', '?')}")
+                lines.append(ds.get("description", ""))
+        else:
+            lines.append("*Not yet generated.*")
+        lines.append("")
+
+        lines.append("## Design Notes")
+        lines.append(ctx_data.get("design_notes",
+                                  "*Not yet generated.*"))
+        lines.append("")
+
+        lines.append("## Disclosure Hint")
+        hint = ctx_data.get("disclosure_hint",
+                            "*Not yet generated.*")
+        lines.append(f"> {hint}")
+        lines.append("")
+
+        wiki_path = dom_dir / f"{mid}.wiki.md"
+        wiki_path.write_text("\n".join(lines), encoding="utf-8")
+        module_docs.append(str(wiki_path))
+
+    # --- Generate INDEX.md ---
+    idx_lines: list[str] = []
+    idx_lines.append(f"# {name} -- Code Wiki Index")
+    idx_lines.append(f"> Total: {skeleton.get('total_modules', 0)} modules | "
+                     f"{skeleton.get('total_lines', 0)} lines | "
+                     f"Languages: {', '.join(skeleton.get('languages', []))}")
+    idx_lines.append("")
+
+    # L0: Project one-liner placeholder
+    idx_lines.append("## Overview")
+    # Try to find the first generated purpose as project description
+    first_purpose = ""
+    for mod in skeleton.get("modules", []):
+        ctx_data = existing.get(mod["id"], {})
+        if ctx_data.get("purpose") and ctx_data["purpose"] != "UNKNOWN":
+            first_purpose = ctx_data["purpose"]
+            break
+    if first_purpose:
+        idx_lines.append(f"> {name} -- {first_purpose}")
     else:
-        lines.append("*Run ctx-gen agent to populate architecture decisions.*\n")
+        idx_lines.append(f"> {name} -- *Run ctx-gen agent to generate project description.*")
+    idx_lines.append("")
 
-    # L2 hint
-    lines.append("---\n")
-    lines.append("## Module Details (L2)")
-    lines.append("")
-    lines.append("Each module has its own L2 detail page:")
-    for m in modules:
-        mid = m.get("module_id", "unknown")
-        lines.append(f"- [{mid}](./modules/{mid}.md)")
-    lines.append("")
+    # Domain table
+    idx_lines.append("## Domains")
+    idx_lines.append("| Domain | Modules | Languages | Tags |")
+    idx_lines.append("|--------|---------|-----------|------|")
+    for d_name, d_info in sorted(domain_summary.items()):
+        langs = ", ".join(d_info.get("languages", []))
+        tags = ", ".join(f"`{t}`" for t in d_info.get("tags", [])[:8])
+        count = d_info.get("module_count", 0)
+        idx_lines.append(f"| [{d_name}](domains/{d_name}/) | {count} | {langs} | {tags} |")
+    idx_lines.append("")
 
-    main_doc = docs / "PROJECT_CONTEXT.md"
-    main_doc.write_text("\n".join(lines), encoding="utf-8")
+    # Quick lookup by tag
+    idx_lines.append("## Tags")
+    all_tags: Counter = Counter()
+    for mod in skeleton.get("modules", []):
+        for t in mod.get("tags", []):
+            all_tags[t] += 1
+    if all_tags:
+        for tag, count in all_tags.most_common(30):
+            matching = [m["id"] for m in skeleton.get("modules", [])
+                        if tag in m.get("tags", [])]
+            idx_lines.append(f"- **`{tag}`** ({count}): "
+                             + ", ".join(matching[:8])
+                             + ("..." if len(matching) > 8 else ""))
+    else:
+        idx_lines.append("*No tags detected. Run scan_skeleton first.*")
+    idx_lines.append("")
 
-    # Per-module L2 docs
-    for m in modules:
-        mid = m.get("module_id", "unknown")
-        ml = [f"# {mid} — L2 Detail\n"]
-        ml.append(f"**Language**: {m.get('language', '?')}  ")
-        ml.append(f"**Entry**: `{m.get('entry', '-')}`  ")
-        ml.append(f"**Files**: {', '.join(m.get('files', [])[:10])}\n")
-        ml.append(f"## Purpose\n{m.get('purpose', '?')}\n")
-        ml.append(f"## Public API\n")
-        for fn in m.get("public_api", []):
-            ml.append(f"- `{fn}`")
-        ml.append("")
-        ml.append(f"## Dependencies\n")
-        for d in m.get("dependencies", []):
-            ml.append(f"- {d}")
-        ml.append("")
-        ml.append(f"## Key Data Structures\n")
-        for ds in m.get("key_data_structures", []):
-            ml.append(f"### {ds.get('name', '?')}")
-            ml.append(ds.get("description", ""))
-        ml.append("")
-        ml.append(f"## Design Notes\n{m.get('design_notes', '*None recorded*')}\n")
-        ml.append(f"## Disclosure Hint\n{m.get('disclosure_hint', '')}\n")
+    # Full module list per domain
+    idx_lines.append("## Module List")
+    for d_name in sorted(domain_summary.keys()):
+        dom_mods = [m for m in skeleton.get("modules", [])
+                    if m.get("domain") == d_name]
+        idx_lines.append(f"### {d_name}")
+        idx_lines.append("| Module | Files | Lines | Entry | Purpose | Tags |")
+        idx_lines.append("|--------|-------|-------|-------|---------|------|")
+        for m in sorted(dom_mods, key=lambda x: x["id"]):
+            mid = m["id"]
+            ctx_data = existing.get(mid, {})
+            purpose = (ctx_data.get("purpose") or "?")[:50]
+            entry = m.get("entry", "-")
+            tags_str = ", ".join(m.get("tags", [])[:5])
+            idx_lines.append(
+                f"| [{mid}](domains/{d_name}/{mid}.wiki.md) | "
+                f"{m.get('file_count', 0)} | "
+                f"{m.get('total_lines', 0)} | "
+                f"`{entry}` | {purpose} | {tags_str} |"
+            )
+        idx_lines.append("")
 
-        mod_doc = modules_dir / f"{mid}.md"
-        mod_doc.write_text("\n".join(ml), encoding="utf-8")
-        module_docs.append(str(mod_doc))
+    idx_path = wiki_dir / "INDEX.md"
+    idx_path.write_text("\n".join(idx_lines), encoding="utf-8")
 
     return {
-        "main_doc": str(main_doc),
+        "index_doc": str(idx_path),
         "module_docs": module_docs,
-        "modules_processed": len(modules),
+        "domain_dirs": domain_dirs,
+        "modules_processed": len(module_docs),
         "errors": errors,
+        "output_format": "wiki",
     }
+
+
+def dep_domain(module_id: str, skeleton: dict) -> str:
+    """Look up a module's domain from skeleton data."""
+    for m in skeleton.get("modules", []):
+        if m["id"] == module_id:
+            return m.get("domain", "_root")
+    return "_root"
 
 
 def mcp_main():
