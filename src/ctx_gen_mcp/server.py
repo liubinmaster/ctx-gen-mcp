@@ -479,32 +479,60 @@ def scan_skeleton(project_dir: str, depth: int = 2,
 
 @mcp.tool()
 def lookup(skeleton_json: str, query: str,
-            lookup_type: str = "auto") -> dict:
+            lookup_type: str = "auto", ctx_dir: str = "") -> dict:
     """Find relevant modules by tag, domain, or keyword.
 
-    Use this tool to quickly locate which modules an AI agent should
-    read, without scanning the entire INDEX.
+    Returns matched module IDs **with a purpose summary for each**,
+    so the agent can judge which module is the correct target.
 
     Args:
         skeleton_json: The skeleton JSON string (from scan_skeleton output).
         query: Search query -- a tag name, domain name, keyword, or module id.
         lookup_type: One of "auto", "tag", "domain", "keyword", "id".
             "auto" tries all strategies and returns the best match.
+        ctx_dir: Optional path to .ctx-cache/ctx/ directory.
+                  If provided (and ctx JSONs exist), each candidate includes
+                  its "purpose" field so the agent can disambiguate.
 
     Returns:
-        Dict with: matched_ids[], match_reason, matched_domains[].
+        Dict with: matched_ids[], match_reason, matched_domains[],
+                 candidates[{id, domain, tags, purpose}].
     """
     try:
         skeleton = json.loads(skeleton_json) if isinstance(skeleton_json, str) else skeleton_json
     except json.JSONDecodeError:
-        return {"error": "Invalid skeleton JSON", "matched_ids": []}
+        return {"error": "Invalid skeleton JSON", "matched_ids": [], "candidates": []}
 
     modules = skeleton.get("modules", [])
     domains = skeleton.get("domains", {})
     q_lower = query.strip().lower()
 
+    # Pre-load purpose summaries from ctx JSONs (if available)
+    purpose_map: dict[str, str] = {}
+    if ctx_dir:
+        ctx_path = Path(ctx_dir)
+        if ctx_path.is_dir():
+            for jf in ctx_path.glob("*.json"):
+                try:
+                    jdata = json.loads(jf.read_text(encoding="utf-8"))
+                    mid = jdata.get("module_id", jf.stem)
+                    purpose_map[mid] = jdata.get("purpose", "")
+                except Exception:
+                    pass
+
     if not q_lower:
-        return {"matched_ids": [], "match_reason": "empty query"}
+        # Return all modules with their purpose as candidates
+        candidates = []
+        for m in modules:
+            mid = m["id"]
+            candidates.append({
+                "id": mid,
+                "domain": m.get("domain", ""),
+                "tags": m.get("tags", []),
+                "purpose": purpose_map.get(mid, ""),
+            })
+        return {"matched_ids": [], "match_reason": "empty query",
+                "matched_domains": [], "candidates": candidates}
 
     matched_ids: list[str] = []
     matched_domains: list[str] = []
@@ -516,8 +544,17 @@ def lookup(skeleton_json: str, query: str,
             if m["id"].lower() == q_lower:
                 matched_ids.append(m["id"])
                 reason = f"exact module id match: {m['id']}"
+                # Build candidates list for the single matched module
+                mid = m["id"]
+                candidates = [{
+                    "id": mid,
+                    "domain": m.get("domain", ""),
+                    "tags": m.get("tags", []),
+                    "purpose": purpose_map.get(mid, ""),
+                }]
                 return {"matched_ids": matched_ids, "match_reason": reason,
-                        "matched_domains": [m.get("domain", "")]}
+                        "matched_domains": [m.get("domain", "")],
+                        "candidates": candidates}
 
     if lookup_type in ("auto", "domain"):
         # Domain match
@@ -529,8 +566,18 @@ def lookup(skeleton_json: str, query: str,
                         matched_ids.append(m["id"])
                 reason = f"domain match: {d_name}"
                 if matched_ids:
+                    candidates = []
+                    for mid in matched_ids:
+                        m = next((x for x in modules if x["id"] == mid), {})
+                        candidates.append({
+                            "id": mid,
+                            "domain": m.get("domain", ""),
+                            "tags": m.get("tags", []),
+                            "purpose": purpose_map.get(mid, ""),
+                        })
                     return {"matched_ids": matched_ids, "match_reason": reason,
-                            "matched_domains": matched_domains}
+                            "matched_domains": matched_domains,
+                            "candidates": candidates}
 
     if lookup_type in ("auto", "tag"):
         # Tag match
@@ -557,10 +604,22 @@ def lookup(skeleton_json: str, query: str,
     if not matched_ids and not reason:
         reason = "no matches found"
 
+    # Build candidates list for all matched_ids
+    candidates = []
+    for mid in matched_ids:
+        m = next((x for x in modules if x["id"] == mid), {})
+        candidates.append({
+            "id": mid,
+            "domain": m.get("domain", ""),
+            "tags": m.get("tags", []),
+            "purpose": purpose_map.get(mid, ""),
+        })
+
     return {
         "matched_ids": matched_ids,
         "match_reason": reason or "no matches found",
         "matched_domains": matched_domains,
+        "candidates": candidates,
     }
 
 

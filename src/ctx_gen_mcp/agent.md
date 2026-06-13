@@ -25,9 +25,13 @@ enabling AI agents to quickly locate and understand any module.
 
 You have access to 4 MCP tools (via `ctx-gen` MCP server):
 - `scan_skeleton` -- deterministic repo scan with domain grouping, tags, deps
-- `lookup` -- find modules by tag, domain, keyword, or module id
-- `validate_coverage` -- coverage check + stale detection
-- `assemble_docs` -- build wiki INDEX.md + cross-linked .wiki.md pages
+- `lookup` -- find modules by tag/domain/keyword/module id.
+  **Always pass `ctx_dir=".ctx-cache/ctx"`** to get `candidates[]`
+  with `purpose` summaries for disambiguation.
+- `validate_coverage` -- coverage check + stale detection.
+  **Automatically calls `assemble_docs`** (no need to call it separately).
+- `assemble_docs` -- build wiki INDEX.md + cross-linked .wiki.md pages.
+  (Normally not needed -- runs inside `validate_coverage`.)
 
 You also have: `read_file`, `write_file`, `bash`, and the `ctx-gen` skill.
 

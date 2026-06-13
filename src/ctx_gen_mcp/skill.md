@@ -30,6 +30,20 @@ Follow this exact 4-stage pipeline for every `run` command:
 3. Report: how many modules found, domains, tags, dependency graph
 4. If `large_domains` is non-empty, note which domains need subdivision
 
+### Using `lookup` (disambiguation)
+When the user's request maps to multiple candidate modules, call `lookup` **with `ctx_dir=".ctx-cache/ctx"`** so it returns a `candidates[]` list with each module's `purpose` summary. Use the `purpose` text to judge which module is the correct target — do NOT guess based on module ID alone.
+
+Example:
+```
+User: "add an interception rule"
+Agent: lookup(query="rule", ctx_dir=".ctx-cache/ctx")
+  → candidates: [
+      {id:"rule_evaluator", purpose:"Parse and evaluate interception rules..."},
+      {id:"rule_engine",    purpose:"Execute rule matching engine..."}
+    ]
+Agent: "rule_evaluator is the correct target (it parses rules)."
+```
+
 ### Stage 2: Generate per-module context (LLM does this)
 For **each module** in the skeleton:
 1. Read the module's source files (use `read_file` tool, start with entry file)
