@@ -1,10 +1,11 @@
-"""ctx_gen_mcp/server.py -- MCP Server with 4 deterministic tools.
+"""ctx_gen_mcp/server.py -- MCP Server with 5 deterministic tools.
 
 Tools:
   scan_skeleton    -- deterministic repo scan with domain grouping, tags, deps (no LLM)
   lookup           -- find modules by tag/domain/keyword
   validate_coverage -- programmatic coverage check + stale detection
   assemble_docs     -- merge all module JSONs into wiki-style MD docs
+  analyze_codebase  -- multi-dimensional codebase analysis (clustering, boundaries, standards)
 
 Output (wiki format):
   docs/wiki/INDEX.md           -- single entry point (~50 lines)
@@ -14,6 +15,8 @@ Usage (stdio transport, for OpenCode MCP config):
   python -m ctx_gen_mcp.server
   # or: ctx-gen-server
 """
+
+__version__ = "0.6.0"  # Version for user reference
 
 from __future__ import annotations
 
@@ -1509,6 +1512,8 @@ def analyze_codebase(project_dir: str, ctx_dir: str = ".ctx-cache/ctx",
 
 def mcp_main():
     """Entry point for `ctx-gen-server` CLI."""
+    import sys
+    print(f"ctx-gen MCP server v{__version__} starting...", file=sys.stderr)
     mcp.run(transport="stdio")
 
 
