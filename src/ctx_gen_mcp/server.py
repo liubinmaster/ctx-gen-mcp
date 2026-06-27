@@ -215,6 +215,11 @@ def _walk_dir(root: Path, code_only: bool) -> list[Path]:
 
 
 def _list_existing_contexts(ctx_dir: Path) -> dict[str, dict]:
+    """Load all existing ctx JSON files from ctx_dir.
+
+    FAIL-FAST: Raises _CtxGenError on the FIRST corrupt JSON file.
+    Silent skipping of corrupt files is NOT allowed.
+    """
     result: dict[str, dict] = {}
     if not ctx_dir.exists():
         return result
@@ -222,8 +227,24 @@ def _list_existing_contexts(ctx_dir: Path) -> dict[str, dict]:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             result[data["module_id"]] = data
-        except Exception:
-            continue
+        except json.JSONDecodeError as e:
+            raise _CtxGenError(
+                f"Corrupt ctx JSON file: {f.name}",
+                details=f"JSON error at line {e.lineno}: {e.msg}",
+                how_to_fix=f"Delete {f} and re-run Stage 2 for that module."
+            ) from e
+        except KeyError as e:
+            raise _CtxGenError(
+                f"Invalid ctx JSON file: {f.name}",
+                details=f"Missing required field: {e}",
+                how_to_fix=f"Delete {f} and re-run Stage 2 for that module."
+            ) from e
+        except Exception as e:
+            raise _CtxGenError(
+                f"Error reading ctx JSON file: {f.name}",
+                details=str(e),
+                how_to_fix=f"Delete {f} and re-run Stage 2 for that module."
+            ) from e
     return result
 
 
