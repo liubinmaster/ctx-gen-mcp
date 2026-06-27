@@ -224,72 +224,53 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
    - **Quality check before saving**: re-read your JSON. If `purpose` could describe
      ANY module in the project, rewrite it to be specific to THIS module.
 
-### Stage 2.5: Glossary Collection (NEW — run ONCE after Stage 2)
+### Stage 3: Validate (use MCP tool `validate_coverage`)
+1. Call `validate_coverage` with `project_dir` and `ctx_dir=".ctx-cache/ctx"`
+2. **[MANDATORY] Check `needs_user_input` in the response**:
+   - If `true`: **STOP immediately** and go to Stage 3.5 (do NOT proceed to Stage 4)
+   - The `glossary_prompts` field lists every unknown abbreviation with source modules
+3. If `missing_ids` is non-empty, go back to Stage 2 for those modules
+4. If `stale_ids` is non-empty, regenerate those modules
+5. If `_fatal_errors` is non-empty, STOP and show errors to user.
 
-After generating ALL module ctx JSONs, collect and confirm unknown abbreviations
-with the user. This produces a project glossary that eliminates hallucination
-in future runs.
+### Stage 3.5: Confirm Unknown Abbreviations (MANDATORY if `needs_user_input=true`)
 
-**Steps**:
+**This stage is NON-OPTIONAL. You MUST complete it before Stage 4.**
 
-1. **Collect**: Scan all `.ctx-cache/ctx/*.json` for `unknown_fields` entries
-   starting with `abbrev:`. Build a de-duped list:
-   ```python
-   unknown_abbrevs = set()
-   for jf in ctx_dir.glob("*.json"):
-       data = json.loads(jf.read_text())
-       for uf in data.get("unknown_fields", []):
-           if uf.startswith("abbrev:"):
-               # extract abbrev name: "abbrev: MDL (...)" -> "MDL"
-               name = uf.split(":")[1].split(" ")[0]
-               unknown_abbrevs.add(name)
+1. **Batch-ask the user** using the `AskUserQuestion` tool with ALL abbreviations
+   from `glossary_prompts`:
    ```
-
-2. **Check glossary**: Filter out any that are already in `.ctx-cache/glossary.json`.
-
-3. **Batch ask the user** (if any remain):
-   Use `AskUserQuestion` ONCE with all unknown abbreviations listed:
+   Question: "I found these abbreviations in the codebase that I couldn't verify from code comments or docs. Do you know what they stand for?"
+   
+   Context (show for each):
+   - MDL: ? (seen in modules: core_engine, pkt_handler)
+     Hint: "...process MDL queue..."
+   - RCV_BUF: ? (seen in: net_layer)
+   
+   (Answer 'unknown' for any you don't know.)
    ```
-   "I found these abbreviations in the codebase that I couldn't explain
-   from comments or docs. Do you know what they stand for?
+   **Do NOT ask one-by-one** — batch ALL unknowns into ONE `AskUserQuestion` call.
 
-   - MDL: ?
-   - RCV_BUF: ?
-   - SND_Q: ?
-
-   (You can answer 'unknown' for any you don't know.)"
-   ```
-   **Do NOT ask one-by-one** — batch them to respect user attention.
-
-4. **Record answers**: Write to `.ctx-cache/glossary.json`:
+2. **Write answers** to `.ctx-cache/glossary.json`:
    ```json
    {
-     "MDL": {
-       "meaning": "Memory Descriptor List",
-       "confirmed_by": "user",
-       "date": "2026-06-27"
-     },
-     "RCV_BUF": {"meaning": "receive buffer", "confirmed_by": "user"}
+     "MDL": {"meaning": "Memory Descriptor List", "confirmed_by": "user"},
+     "RCV_BUF": {"meaning": "[UNKNOWN]"}
    }
    ```
-   For abbreviations the user doesn't know, write `"meaning": "[UNKNOWN]"`
-   (this prevents re-asking in future runs).
+   (Write `"[UNKNOWN]"` for ones the user doesn't know — prevents re-asking.)
 
-5. **Re-render wiki**: Call `assemble_docs` again. It now loads the glossary
+3. **Re-render wiki**: Call `assemble_docs` again. It now loads the glossary
    and replaces `[NEEDS VERIFICATION: MDL]` with the confirmed meaning
    (marked with `[GLOSSARY]` badge instead of `[UNVERIFIED]`).
+
+4. Now proceed to Stage 4.
 
 **Glossary file guidance**:
 - `.ctx-cache/glossary.json` is **project knowledge** — consider committing it
   to the repo (unlike `.ctx-cache/skeleton.json` which is a build artifact).
 - If the project already has `docs/terminology.md` or similar, parse it and
   pre-fill the glossary before Stage 2.
-
-### Stage 3: Validate (use MCP tool `validate_coverage`)
-1. Call `validate_coverage` with `project_dir` and `ctx_dir=".ctx-cache/ctx"`
-2. If `missing_ids` is non-empty, go back to Stage 2 for those modules
-3. If `stale_ids` is non-empty, regenerate those modules
-4. If `unknown_fields_summary` is non-empty, flag for manual review in output
 
 ### Stage 4: Assemble (MANDATORY -- use MCP tool `assemble_docs`)
 

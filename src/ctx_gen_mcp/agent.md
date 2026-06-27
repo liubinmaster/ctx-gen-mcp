@@ -64,20 +64,36 @@ When the user says "generate context", "create wiki", or "describe codebase":
 
 1. **Scan**: Call `scan_skeleton(project_dir=".")` -> save to `.ctx-cache/skeleton.json`
 2. **Generate**: For each module in skeleton, use the **5-step reading protocol**
-   in the skill (Steps A-E: entry point → headers → purpose → design constraints →
-   data structures), then produce a JSON context object. Quality check before saving:
+   in the skill (Steps A-F: entry point → headers → purpose → design constraints →
+   data structures → acronym verification), then produce a JSON context object.
+   Quality check before saving:
    if `purpose` could describe ANY module, rewrite it to be specific.
    Save each to `.ctx-cache/ctx/<module_id>.json`.
    **NEW**: Before explaining any abbreviation, check `.ctx-cache/glossary.json`
-   (see skill Step F5).
-3. **Glossary Collection (NEW)**: After ALL modules are generated, scan
-   `unknown_fields` in every ctx JSON for `"abbrev:"` entries. Deduplicate.
-   If any unknown abbreviations remain, batch-ask the user via `AskUserQuestion`.
-   Write answers to `.ctx-cache/glossary.json`.
-   Re-run `assemble_docs` to update wiki pages with confirmed explanations.
-4. **Validate**: Call `validate_coverage(project_dir=".", ctx_dir=".ctx-cache/ctx")`
-   -> if missing modules, repeat step 2.
+   (see skill Step F5). If the abbrev is NOT in glossary and you can't find
+   evidence in code, write `[NEEDS VERIFICATION: ABBREV]` and list in `unknown_fields`.
+3. **Validate**: Call `validate_coverage(project_dir=".", ctx_dir=".ctx-cache/ctx")`
+   → **CHECK `needs_user_input` in the response** (see step 3.5 below).
+   → if `missing_ids` non-empty, repeat step 2 for those modules.
+4. **[MANDATORY] Glossary Confirmation (if `needs_user_input=true` in step 3)**:
+   - Batch-ask the user about ALL abbreviations in `glossary_prompts`:
+     Output a message like:
+     ```
+     I found these abbreviations in the codebase that I couldn't verify from comments or docs. Do you know what they stand for?
+     
+     - MDL: ? (seen in modules: core_engine, pkt_handler)
+       Hint: "...process MDL queue..."
+     - RCV_BUF: ? (seen in: net_layer)
+     
+     (Answer 'unknown' for any you don't know. Format: ABBREV = meaning)
+     ```
+   - **WAIT for user's answer** (do NOT proceed to step 5 until you have it).
+   - Write answers to `.ctx-cache/glossary.json`:
+     `{"MDL": {"meaning": "Memory Descriptor List", "confirmed_by": "user"}}`
+     For unknown ones: `{"MDL": {"meaning": "[UNKNOWN]"}}`
+   - Re-run `assemble_docs` to apply glossary (this replaces `[NEEDS VERIFICATION]` tokens).
 5. **Assemble**: Call `assemble_docs(project_dir=".", ctx_dir=".ctx-cache/ctx", out_docs="./docs")`
+   (Normally this already ran inside `validate_coverage`, but run it again after step 4 to apply glossary.)
 6. **Report**: Coverage %, domain breakdown, and path to `docs/wiki/INDEX.md`.
 
 ## CRITICAL: Output File Rules

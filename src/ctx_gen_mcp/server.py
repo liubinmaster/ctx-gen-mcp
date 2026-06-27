@@ -767,8 +767,15 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         Dict with: total_modules, generated, coverage_pct, missing_ids[],
         stale_ids[], unknown_fields_summary{}, wiki_auto_generated,
         wiki_index (path), wiki_modules (count),
+        glossay_count, glossay_errors[],
+        glossay_prompts[{abbrev, modules[], context_hint}],
+        needs_user_input (bool -- True if there are unknown abbreviations),
+        hallucination_warnings[], anchor_errors[],
         _fatal_errors[] (non-empty = output is unreliable, agent MUST stop),
         status ('ok' or 'error').
+        ***IMPORTANT***: If `needs_user_input` is True, the agent MUST
+        STOP and ask the user to confirm the abbreviations in `glossary_prompts`
+        BEFORE proceeding to any further steps.  This is not optional.
     """
     # Pre-condition checks (fail-fast)
     _require(project_dir and isinstance(project_dir, str),
@@ -837,6 +844,9 @@ def validate_coverage(project_dir: str, ctx_dir: str,
     missing = [mid for mid in modules if mid not in existing]
     stale: list[str] = []
     unknown_summary: dict[str, list[str]] = {}
+    # Also collect glossary prompts (unknow abbreviations) across all modules
+    glossary_prompts: list[dict] = []
+    _seen_abbrevs: dict[str, list[str]] = {}  # abbrev -> list of module ids
 
     for mid, data in existing.items():
         if check_stale and mid in modules:
@@ -846,6 +856,66 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         u = data.get("unknown_fields", [])
         if u:
             unknown_summary[mid] = u
+            # Extract abbreviation entries from unknown_fields
+            for entry in u:
+                # Match "abbrev: MDL (no evidence...)" or "[NEEDS VERIFICATION: MDL]"
+                import re
+                # Pattern 1: "abbrev: ABBREV ..."
+                m = re.search(r'abbrev:\s*(\S+)', entry)
+                if m:
+                    abbr = m.group(1).strip(')').upper()
+                    if abbr not in _seen_abbrevs:
+                        _seen_abbrevs[abbr] = []
+                    _seen_abbrevs[abbr].append(mid)
+                # Pattern 2: "[NEEDS VERIFICATION: ABBREV]"
+                for m2 in re.finditer(r'\[NEEDS VERIFICATION:\s*(\S+?)\s*\]', entry, re.IGNORECASE):
+                    abbr = m2.group(1).strip(')').upper()
+                    if abbr not in _seen_abbrevs:
+                        _seen_abbrevs[abbr] = []
+                    _seen_abbrevs[abbr].append(mid)
+        # Also scan text fields for [NEEDS VERIFICATION: X] tokens
+        for field in ("purpose", "design_notes", "disclosure_hint"):
+            text = data.get(field, "")
+            if not text or not isinstance(text, str):
+                continue
+            for m in re.finditer(r'\[NEEDS VERIFICATION:\s*(\S+?)\s*\]', text, re.IGNORECASE):
+                abbr = m.group(1).strip(')').upper()
+                if abbr not in _seen_abbrevs:
+                    _seen_abbrevs[abbr] = []
+                if mid not in _seen_abbrevs[abbr]:
+                    _seen_abbrevs[abbr].append(mid)
+
+    # Filter out already-confirmed abbreviations from glossary.json
+    confirmed: set[str] = set()
+    if glossary_path.exists():
+        try:
+            raw = json.loads(glossary_path.read_text(encoding="utf-8"))
+            for k, v in raw.items():
+                meaning = v if isinstance(v, str) else v.get("meaning", "") if isinstance(v, dict) else ""
+                if meaning and meaning != "[UNKNOWN]":
+                    confirmed.add(k.upper())
+        except Exception:
+            pass  # glossary_errors already captured above
+    for abbr, mods in _seen_abbrevs.items():
+        if abbr in confirmed:
+            continue
+        # Get context: find the line containing this abbrev in the module's ctx
+        context_hint = ""
+        for mid in mods:
+            d = existing.get(mid, {})
+            pur = d.get("purpose", "")
+            if abbr in pur.upper():
+                # Extract a short context snippet
+                idx = pur.upper().find(abbr)
+                start = max(0, idx - 40)
+                end = min(len(pur), idx + len(abbr) + 40)
+                context_hint = pur[start:end].replace("\n", " ")
+                break
+        glossary_prompts.append({
+            "abbrev": abbr,
+            "modules": mods,
+            "context_hint": context_hint,
+        })
 
     # Auto-assemble wiki docs if any context JSONs exist
     wiki_result = None
@@ -872,6 +942,9 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         "unknown_fields_summary": unknown_summary,
         "glossary_count": glossary_count,
         "glossary_errors": glossary_errors,
+        "glossary_prompts": glossary_prompts,
+        "needs_user_input": len(glossary_prompts) > 0,
+        "next_action": "ask_user_glossary" if glossary_prompts else ("proceed_to_assemble" if generated > 0 else "generate_context"),
         "hallucination_warnings": hallucination_warnings,
         "anchor_errors": anchor_errors,
         "wiki_auto_generated": wiki_result is not None,
