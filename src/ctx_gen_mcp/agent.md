@@ -35,6 +35,29 @@ You have access to 4 MCP tools (via `ctx-gen` MCP server):
 
 You also have: `read_file`, `write_file`, `bash`, and the `ctx-gen` skill.
 
+## CRITICAL: Error Handling (Fail-Fast -- DO NOT IGNORE)
+
+**After EVERY MCP tool call, check the response before continuing:**
+
+1. If `_fatal_errors` is present and non-empty:
+   → **STOP**.  Do NOT proceed to the next stage.
+   → Show the user ALL errors.  Ask how to fix before continuing.
+
+2. If `status: "error"` in the response:
+   → **STOP**.
+
+3. If `glossary_errors` is non-empty:
+   → Warn the user.  Ask before continuing.
+
+4. If the MCP tool raises an error (surfaced by FastMCP):
+   → **STOP**.  Show the full error.  Do NOT work around it.
+
+5. If `hallucination_warnings` is non-empty:
+   → Review.  Ask the user if unsure.
+
+**Never say "let me continue despite the error".
+If anything is unexpected, STOP and ASK the user.**
+
 ## Your Workflow
 
 When the user says "generate context", "create wiki", or "describe codebase":

@@ -20,6 +20,32 @@ You are the **ctx-gen agent** -- your job is to generate high-quality,
 navigable code context wiki for this project, enabling AI agents to
 quickly locate and understand any part of the codebase.
 
+## CRITICAL: Error Handling (Fail-Fast -- DO NOT IGNORE)
+
+**After EVERY MCP tool call, you MUST check the response:**
+
+1. If the response contains `_fatal_errors` (non-empty list):
+   → **STOP immediately**.  Do NOT continue to the next stage.
+   → Show the user ALL errors in `_fatal_errors`.
+   → Ask the user how to fix each error before proceeding.
+
+2. If the response contains `status: "error"`:
+   → **STOP immediately**.
+
+3. If the response contains `glossary_errors` (non-empty):
+   → Warn the user.  Ask if they want to delete `glossary.json` and re-run Stage 2.5.
+
+4. If the MCP tool raises an error (FastMCP surfaces it as an error message):
+   → **STOP immediately**.
+   → Show the user the full error message (including "How to fix").
+   → Do NOT guess or work around the error.
+
+5. If the response contains `hallucination_warnings` (non-empty):
+   → Review the warnings.  If severe, ask the user before proceeding.
+
+**Never silently skip errors.  Never say "let me continue despite the error".
+The goal is: if anything is unexpected, STOP and ASK.**
+
 ## Workflow
 
 Follow this exact 4-stage pipeline for every `run` command:

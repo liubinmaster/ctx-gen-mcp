@@ -28,6 +28,62 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+
+
+# -- Fail-Fast Infrastructure --------------------------------------------------
+#
+# All tools MUST pre-validate inputs and raise _CtxGenError on any
+# unexpected condition.  Silent fallbacks and 'except: pass' are forbidden.
+#
+# Error convention:
+#   - Pre-condition failure (bad input, missing files):
+#       raise _CtxGenError(message)  -- FastMCP returns this as an MCP error
+#   - Processing issue (corrupt JSON, suspicious data):
+#       return {'_fatal_errors': [...], 'status': 'error', ...}
+#       Agent MUST check '_fatal_errors' and stop if present.
+#   - Warning (recoverable):
+#       return {'warnings': [...], 'status': 'ok', ...}
+
+class _CtxGenError(ValueError):
+    """Raised when a tool cannot proceed.  FastMCP surfaces the message to the agent."""
+    def __init__(self, summary: str, details: str = '', how_to_fix: str = ''):
+        self.summary = summary
+        self.details = details
+        self.how_to_fix = how_to_fix
+        msg = f"[ctx-gen ERROR] {summary}"
+        if details:
+            msg += f"\n  Details: {details}"
+        if how_to_fix:
+            msg += f"\n  How to fix: {how_to_fix}"
+        super().__init__(msg)
+
+
+def _require(condition: bool, summary: str, **kwargs):
+    """raise _CtxGenError if condition is False."""
+    if not condition:
+        raise _CtxGenError(summary, **kwargs)
+
+
+def _validate_ctx_json(path: Path) -> list:
+    """Validate a single ctx JSON file.  Returns list of error strings (empty = valid)."""
+    errors = []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return [f"Invalid JSON at line {e.lineno}: {e.msg}"]
+    except Exception as e:
+        return [f"Cannot read file: {e}"]
+
+    if not isinstance(data, dict):
+        return ["Top-level JSON must be an object/dict, not a list."]
+    mid = data.get("module_id", "")
+    if not mid or not isinstance(mid, str):
+        errors.append("Missing or invalid 'module_id' field (must be non-empty string).")
+    if "source_hash" not in data:
+        errors.append("Missing 'source_hash' field -- this ctx JSON may be from an old version.")
+    return errors
+
+
 # -- Constants ----------------------------------------------------------------
 
 DEFAULT_CODE_EXTS = {
@@ -473,8 +529,25 @@ def scan_skeleton(project_dir: str, depth: int = 2,
         dependencies), domains{} (summary per domain),
         large_domains[] (domains with >10 modules needing subdivision).
     """
+    _require(project_dir and isinstance(project_dir, str),
+             "project_dir must be a non-empty string.",
+             how_to_fix="Pass the absolute path to the project root directory.")
     root = Path(project_dir).resolve()
-    return _scan_repo(root, depth=depth, code_only=code_only)
+    _require(root.exists(),
+             f"project_dir does not exist: {root}",
+             how_to_fix=f"Check the path.  Current working directory is {{Path.cwd()}}.")
+    _require(root.is_dir(),
+             f"project_dir exists but is not a directory: {root}",
+             how_to_fix="Pass a directory path, not a file path.")
+    try:
+        return _scan_repo(root, depth=depth, code_only=code_only)
+    except Exception as e:
+        raise _CtxGenError(
+            f"_scan_repo failed unexpectedly: {e}",
+            details=f"project_dir={root}, depth={depth}",
+            how_to_fix="Check that the project directory contains readable code files.  "
+                      "This may also be a bug -- please report it."
+        ) from e
 
 
 @mcp.tool()
@@ -498,27 +571,58 @@ def lookup(skeleton_json: str, query: str,
         Dict with: matched_ids[], match_reason, matched_domains[],
                  candidates[{id, domain, tags, purpose}].
     """
+    # Pre-condition checks (fail-fast)
+    _require(skeleton_json and isinstance(skeleton_json, str),
+             "skeleton_json must be a non-empty JSON string.",
+             how_to_fix="Call scan_skeleton first, then pass its output JSON string.")
+    _require(query and isinstance(query, str),
+             "query must be a non-empty string.",
+             how_to_fix="Provide a search query (module id, tag, domain, or keyword).")
+    _require(lookup_type in ("auto", "tag", "domain", "keyword", "id"),
+             f"lookup_type must be one of: auto, tag, domain, keyword, id. Got: {lookup_type}",
+             how_to_fix="Use 'auto' if unsure.")
+
+    # Parse skeleton JSON (raise on failure -- no silent fallback)
     try:
-        skeleton = json.loads(skeleton_json) if isinstance(skeleton_json, str) else skeleton_json
-    except json.JSONDecodeError:
-        return {"error": "Invalid skeleton JSON", "matched_ids": [], "candidates": []}
+        skeleton = json.loads(skeleton_json)
+    except json.JSONDecodeError as e:
+        raise _CtxGenError(
+            f"Invalid skeleton JSON: {e.msg}",
+            details=f"Line {e.lineno}, column {e.colno}.  "
+                      f"Skeleton JSON starts with: {skeleton_json[:100]!r}...",
+            how_to_fix="The skeleton_json argument appears to be corrupted.  "
+                      "Re-call scan_skeleton to get a fresh skeleton JSON."
+        ) from e
+
+    _require(isinstance(skeleton, dict),
+             f"skeleton_json must parse to a dict, got {type(skeleton).__name__}.",
+             how_to_fix="Pass the raw JSON string from scan_skeleton output, not a processed value.")
 
     modules = skeleton.get("modules", [])
     domains = skeleton.get("domains", {})
     q_lower = query.strip().lower()
 
     # Pre-load purpose summaries from ctx JSONs (if available)
+    # Raise on corrupt ctx JSONs (don't silently skip)
     purpose_map: dict[str, str] = {}
     if ctx_dir:
         ctx_path = Path(ctx_dir)
-        if ctx_path.is_dir():
-            for jf in ctx_path.glob("*.json"):
-                try:
-                    jdata = json.loads(jf.read_text(encoding="utf-8"))
-                    mid = jdata.get("module_id", jf.stem)
-                    purpose_map[mid] = jdata.get("purpose", "")
-                except Exception:
-                    pass
+        _require(ctx_path.exists(),
+                 f"ctx_dir does not exist: {ctx_path}",
+                 how_to_fix="Check that Stage 2 (Generate) has completed and ctx JSONs were saved.")
+        _require(ctx_path.is_dir(),
+                 f"ctx_dir exists but is not a directory: {ctx_path}")
+        for jf in ctx_path.glob("*.json"):
+            try:
+                data = json.loads(jf.read_text(encoding="utf-8"))
+            except Exception as e:
+                raise _CtxGenError(
+                    f"Corrupt ctx JSON file: {jf.name}",
+                    details=str(e),
+                    how_to_fix=f"Delete {jf} and re-run Stage 2 for that module."
+                ) from e
+            mid = data.get("module_id", "")
+            purpose_map[mid] = data.get("purpose", "")[:120]
 
     if not q_lower:
         # Return all modules with their purpose as candidates
@@ -624,11 +728,12 @@ def lookup(skeleton_json: str, query: str,
 
 
 @mcp.tool()
+@mcp.tool()
 def validate_coverage(project_dir: str, ctx_dir: str,
                      check_stale: bool = True) -> dict:
     """Validate that every module has a generated context JSON, and detect stale ones.
 
-    **IMPORTANT**: This tool automatically calls `assemble_docs` if any context
+    **IMPORTANT**: This tool automatically calls  if any context
     JSONs exist, so wiki MD files are always generated. No need to call
     assemble_docs separately.
 
@@ -640,25 +745,60 @@ def validate_coverage(project_dir: str, ctx_dir: str,
     Returns:
         Dict with: total_modules, generated, coverage_pct, missing_ids[],
         stale_ids[], unknown_fields_summary{}, wiki_auto_generated,
-        wiki_index (path), wiki_modules (count).
+        wiki_index (path), wiki_modules (count),
+        _fatal_errors[] (non-empty = output is unreliable, agent MUST stop),
+        status ('ok' or 'error').
     """
+    # Pre-condition checks (fail-fast)
+    _require(project_dir and isinstance(project_dir, str),
+             "project_dir must be a non-empty string.")
+    _require(ctx_dir and isinstance(ctx_dir, str),
+             "ctx_dir must be a non-empty string.",
+             how_to_fix="Pass the path to .ctx-cache/ctx/ directory.")
+
     root = Path(project_dir).resolve()
     ctx = Path(ctx_dir)
-    skeleton = _scan_repo(root, depth=2, code_only=True)
+    _require(root.exists(), f"project_dir does not exist: {root}")
+    _require(root.is_dir(), f"project_dir exists but is not a directory: {root}")
+
+    # Scan repo (raise on failure -- no silent fallback)
+    try:
+        skeleton = _scan_repo(root, depth=2, code_only=True)
+    except Exception as e:
+        raise _CtxGenError(
+            f"_scan_repo failed: {e}",
+            details=f"project_dir={root}",
+            how_to_fix="Check that the project directory is accessible and contains code files."
+        ) from e
+
     modules = {m["id"]: m for m in skeleton.get("modules", [])}
 
+    # Validate all existing ctx JSON files (fail on corrupt files)
     existing = _list_existing_contexts(ctx)
+    fatal_errors: list[str] = []
+    for mid in existing:
+        ctx_path = ctx / f"{mid}.json"
+        if ctx_path.exists():
+            errs = _validate_ctx_json(ctx_path)
+            if errs:
+                for err in errs:
+                    fatal_errors.append(f"[{mid}.json] {err}")
+
     generated = len(existing)
     total = skeleton.get("total_modules", 0)
     pct = round(generated / total * 100, 1) if total > 0 else 0.0
 
-    # Load project glossary for stats
+    # Load project glossary for stats (report errors, don't silently pass)
     glossary_count = 0
+    glossary_errors: list[str] = []
     glossary_path = root / ".ctx-cache" / "glossary.json"
     if glossary_path.exists():
         try:
             raw = json.loads(glossary_path.read_text(encoding="utf-8"))
-            for v in raw.values():
+            _require(isinstance(raw, dict),
+                     f"glossary.json must be a JSON dict, got {type(raw).__name__}.",
+                     how_to_fix=f"Delete {glossary_path} and re-run Stage 2.5 (Glossary Collection).")
+            for k, v in raw.items():
                 meaningful = False
                 if isinstance(v, str) and v != "[UNKNOWN]":
                     meaningful = True
@@ -666,8 +806,12 @@ def validate_coverage(project_dir: str, ctx_dir: str,
                     meaningful = True
                 if meaningful:
                     glossary_count += 1
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            glossary_errors.append(f"glossary.json is corrupt JSON: {e.msg} (line {e.lineno})")
+        except _CtxGenError as e:
+            glossary_errors.append(e.summary)
+        except Exception as e:
+            glossary_errors.append(f"Unexpected error reading glossary.json: {e}")
 
     missing = [mid for mid in modules if mid not in existing]
     stale: list[str] = []
@@ -682,9 +826,7 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         if u:
             unknown_summary[mid] = u
 
-    # Auto-assemble wiki docs if coverage >= 100% (or >0 modules exist)
-    # This ensures wiki files are always generated -- no need for agent to
-    # call assemble_docs separately.
+    # Auto-assemble wiki docs if any context JSONs exist
     wiki_result = None
     out_docs_default = str(root / "docs")
     hallucination_warnings: list[str] = []
@@ -694,16 +836,13 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         wiki_result = assemble_docs(str(root), str(ctx), out_docs_default)
         if wiki_result.get("errors"):
             unknown_summary["_wiki_errors"] = wiki_result["errors"]
-
-        # Run hallucination detection on every ctx JSON
         for mid, data in existing.items():
             hw = _detect_hallucinations(data)
-            halluccination_warnings.extend(hw)
-            # Validate source anchors against real files
+            hallucination_warnings.extend(hw)
             ae = _validate_source_anchors(data, root)
             anchor_errors.extend(ae)
 
-    return {
+    result = {
         "total_modules": total,
         "generated": generated,
         "coverage_pct": pct,
@@ -711,12 +850,19 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         "stale_ids": stale,
         "unknown_fields_summary": unknown_summary,
         "glossary_count": glossary_count,
+        "glossary_errors": glossary_errors,
         "hallucination_warnings": hallucination_warnings,
         "anchor_errors": anchor_errors,
         "wiki_auto_generated": wiki_result is not None,
         "wiki_index": wiki_result.get("index_doc", "") if wiki_result else "",
         "wiki_modules": wiki_result.get("modules_processed", 0) if wiki_result else 0,
     }
+    if fatal_errors:
+        result["_fatal_errors"] = fatal_errors
+        result["status"] = "error"
+    else:
+        result["status"] = "ok"
+    return result
 
 
 @mcp.tool()
@@ -732,10 +878,20 @@ def assemble_docs(project_dir: str, ctx_dir: str,
         project_name: Optional project name (default: inferred from project_dir).
 
     Returns:
-        Dict with: index_doc, module_docs[], domain_dirs[], errors[].
+        Dict with: index_doc, module_docs[], domain_dirs[], errors[],
+                 _fatal_errors[] (non-empty = wiki is unreliable).
     """
+    # Pre-condition checks (fail-fast)
+    _require(project_dir and isinstance(project_dir, str),
+             "project_dir must be a non-empty string.")
+    _require(ctx_dir and isinstance(ctx_dir, str),
+             "ctx_dir must be a non-empty string.")
+
     root = Path(project_dir).resolve()
     ctx = Path(ctx_dir)
+    _require(root.exists(), f"project_dir does not exist: {root}")
+    _require(root.is_dir(), f"project_dir exists but is not a directory: {root}")
+
     docs = Path(out_docs)
     wiki_dir = docs / "wiki"
     domains_dir = wiki_dir / "domains"
@@ -745,21 +901,27 @@ def assemble_docs(project_dir: str, ctx_dir: str,
     name = project_name or root.name or "Project"
     existing = _list_existing_contexts(ctx)
 
-    # Load project glossary (user-confirmed abbreviation explanations)
+    # Load project glossary (fail on corrupt file -- don't silently pass)
     glossary: dict = {}
+    glossary_errors: list[str] = []
     glossary_path = root / ".ctx-cache" / "glossary.json"
     if glossary_path.exists():
         try:
             raw = json.loads(glossary_path.read_text(encoding="utf-8"))
-            # Support both simple format {"MDL": "meaning"} and detailed format
-            # {"MDL": {"meaning": "...", ...}}
+            _require(isinstance(raw, dict),
+                     f"glossary.json must be a JSON dict, got {type(raw).__name__}.",
+                     how_to_fix=f"Delete {glossary_path} and re-run Stage 2.5.")
             for k, v in raw.items():
-                if isinstance(v, str):
+                if isinstance(v, str) and v != "[UNKNOWN]":
                     glossary[k.upper()] = v
-                elif isinstance(v, dict) and "meaning" in v:
+                elif isinstance(v, dict) and v.get("meaning", "") != "[UNKNOWN]":
                     glossary[k.upper()] = v["meaning"]
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            glossary_errors.append(f"glossary.json corrupt JSON: {e.msg} (line {e.lineno})")
+        except _CtxGenError as e:
+            glossary_errors.append(e.summary)
+        except Exception as e:
+            glossary_errors.append(f"Unexpected error reading glossary.json: {e}")
 
     def _apply_glossary(text: str) -> tuple[str, list[str]]:
         """Replace `[NEEDS VERIFICATION: X]` tokens with glossary entries.
@@ -1074,7 +1236,9 @@ def assemble_docs(project_dir: str, ctx_dir: str,
         "domain_dirs": domain_dirs,
         "modules_processed": len(module_docs),
         "errors": errors,
+        "glossary_errors": glossary_errors,
         "output_format": "wiki",
+        "_fatal_errors": glossary_errors,  # non-empty = wiki may be unreliable
     }
 
 
