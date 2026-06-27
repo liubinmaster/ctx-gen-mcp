@@ -45,13 +45,19 @@ Agent: "rule_evaluator is the correct target (it parses rules)."
 ```
 
 ### Stage 2: Generate per-module context (LLM does this)
+
+**CRITICAL: `module_id` MUST exactly match the `id` field in the skeleton.**
+Do NOT invent module IDs from file names or function names.
+The skeleton says `"id": "src"` → your JSON must have `"module_id": "src"`.
+If you use a different name the wiki page will show empty content.
+
 For **each module** in the skeleton:
 1. Read the module's source files (use `read_file` tool, start with entry file)
 2. Generate a JSON object matching this **exact schema**:
 
 ```json
 {
-  "module_id": "<from skeleton>",
+  "module_id": "<COPY EXACT id FROM skeleton -- do not change>",
   "language": "<python|cpp|c|...>",
   "purpose": "<1-2 sentences, WHY this module exists, >=30 chars>",
   "public_api": ["func1(arg1: Type) -> RetType", "class Foo.method()"],

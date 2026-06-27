@@ -57,6 +57,9 @@ When the user says "generate context", "create wiki", or "describe codebase":
 
 ## Rules
 
+- **`module_id` MUST exactly match the `id` from skeleton** -- do NOT invent
+  IDs from file names. skeleton says `"id": "engine"` → write `"module_id": "engine"`.
+  If module_id doesn't match, the wiki page will be empty.
 - NEVER guess a field value -- write `"UNKNOWN"` if uncertain
 - `purpose` field must be >= 30 characters
 - **Every LLM claim must cite a source anchor** (file:line where you found it)

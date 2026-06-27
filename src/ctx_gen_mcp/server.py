@@ -719,6 +719,27 @@ def assemble_docs(project_dir: str, ctx_dir: str,
     all_modules = {m["id"]: m for m in skeleton.get("modules", [])}
     domain_summary = skeleton.get("domains", {})
 
+    # Build a fallback lookup: file stems and path parts -> ctx_data
+    # This handles the common case where agent wrote module_id by filename
+    # (e.g. "engine") but skeleton id is a directory (e.g. "src")
+    def _find_ctx_data(mid: str, mod_files: list[str]) -> dict:
+        """Find ctx data by exact id match first, then by file/path heuristics."""
+        if mid in existing:
+            return existing[mid]
+        # Try matching by files: if any ctx JSON covers the same file stems
+        file_stems = {Path(f).stem.lower() for f in mod_files}
+        for ctx_id, ctx_data in existing.items():
+            # ctx JSON module_id matches a file stem in this module
+            if ctx_id.lower() in file_stems:
+                return ctx_data
+            # ctx JSON covers files that overlap with this module
+            ctx_files = ctx_data.get("files", [])
+            if ctx_files:
+                ctx_stems = {Path(f).stem.lower() for f in ctx_files}
+                if file_stems & ctx_stems:
+                    return ctx_data
+        return {}
+
     errors: list[str] = []
     module_docs: list[str] = []
     domain_dirs: list[str] = []
@@ -727,7 +748,7 @@ def assemble_docs(project_dir: str, ctx_dir: str,
     for mod in skeleton.get("modules", []):
         mid = mod["id"]
         domain = mod.get("domain", "_root")
-        ctx_data = existing.get(mid, {})
+        ctx_data = _find_ctx_data(mid, mod.get("files", []))
         tags = mod.get("tags", [])
         deps = mod.get("dependencies", {})
         used_by = {m["id"]: "imports" for m in skeleton.get("modules", [])
