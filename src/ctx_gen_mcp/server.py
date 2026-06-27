@@ -30,6 +30,13 @@ from mcp.server.fastmcp import FastMCP
 
 
 
+# -- Codebase Analysis Tool --
+try:
+    from .analyze_codebase import analyze_codebase as _analyze_codebase_fn
+except ImportError:
+    _analyze_codebase_fn = None
+
+
 # -- Fail-Fast Infrastructure --------------------------------------------------
 #
 # All tools MUST pre-validate inputs and raise _CtxGenError on any
@@ -1448,6 +1455,56 @@ def _validate_source_anchors(ctx_data: dict, root: Path) -> list[str]:
             pass  # skip if can't read
 
     return errors
+
+
+
+
+# -- Tool: analyze_codebase --------------------------------------------------
+
+@mcp.tool()
+def analyze_codebase(project_dir: str, ctx_dir: str = ".ctx-cache/ctx",
+                    skeleton_path: str = ".ctx-cache/skeleton.json",
+                    out_docs: str = "docs") -> dict:
+    """Analyze codebase for module clustering, boundaries, and coding standards.
+
+    This tool performs multi-dimensional analysis to:
+    1. Cluster modules by functional similarity (dependencies, data structures, naming)
+    2. Identify module boundaries and responsibilities
+    3. Extract coding standards (including I-type interface priority)
+
+    Use this AFTER all ctx JSONs are generated and validated (Stage 4).
+    The output helps AI agents understand where new code should be placed
+    and which interfaces to call first.
+
+    Args:
+        project_dir: Root directory of the project
+        ctx_dir: Directory containing ctx JSON files (default: .ctx-cache/ctx)
+        skeleton_path: Path to skeleton JSON (default: .ctx-cache/skeleton.json)
+        out_docs: Output directory for generated docs (default: docs)
+
+    Returns:
+        dict with status, clusters, i_interfaces, output_files, recommendations
+    """
+    _require(_analyze_codebase_fn is not None,
+             "analyze_codebase module not available.  Re-install ctx-gen.",
+             how_to_fix="Run: pip install --force-reinstall ctx-gen")
+
+    try:
+        result = _analyze_codebase_fn(
+            project_dir=project_dir,
+            ctx_dir=ctx_dir,
+            skeleton_path=skeleton_path,
+            out_docs=out_docs,
+        )
+        return result
+    except _CtxGenError:
+        raise  # Let FastMCP handle it
+    except Exception as e:
+        raise _CtxGenError(
+            f"analyze_codebase failed: {e}",
+            details=str(e),
+            how_to_fix="Check that ctx JSON files are valid and skeleton.json exists."
+        )
 
 
 def mcp_main():

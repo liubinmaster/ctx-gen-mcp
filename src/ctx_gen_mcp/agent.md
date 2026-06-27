@@ -32,6 +32,10 @@ You have access to 4 MCP tools (via `ctx-gen` MCP server):
   **Automatically calls `assemble_docs`** (no need to call it separately).
 - `assemble_docs` -- build wiki INDEX.md + cross-linked .wiki.md pages.
   (Normally not needed -- runs inside `validate_coverage`.)
+- `analyze_codebase` -- multi-dimensional codebase analysis.
+  Clusters modules by similarity, identifies module boundaries,
+  extracts coding standards (including I-type interface priority).
+  Generates `docs/MODULE_BOUNDARIES.md` and `docs/CODING_STANDARDS.md`.
 
 You also have: `read_file`, `write_file`, `bash`, and the `ctx-gen` skill.
 
@@ -77,11 +81,14 @@ When the user says "generate context", "create wiki", or "describe codebase":
    - Batch-ask the user about ALL abbreviations in `glossary_prompts`.
    - Write answers to `.ctx-cache/glossary.json`.
    - Re-run `assemble_docs` to apply glossary.
-5. **[Optional] Extract Coding Standards** (Stage 5 in skill):
+5. **[Recommended] Codebase Analysis** (Stage 5 in skill):
    - After all ctx JSONs are validated and glossary confirmed,
-   - Analyze naming conventions, error handling patterns, struct layout from ctx JSONs.
-   - Cluster modules by domain, extract per-domain conventions.
-   - Generate `docs/CODING_STANDARDS.md`.
+   - Call `analyze_codebase(project_dir=".", ctx_dir=".ctx-cache/ctx")`
+   - This tool automatically:
+     * Clusters modules by multi-dimensional similarity (dependencies, data structures, naming)
+     * Identifies I-type interfaces and generates priority rules
+     * Generates `docs/MODULE_BOUNDARIES.md` and `docs/CODING_STANDARDS.md`
+   - Read the generated docs to understand module boundaries and coding standards.
 6. **Assemble**: Call `assemble_docs(project_dir=".", ctx_dir=".ctx-cache/ctx", out_docs="./docs")`
 7. **Report**: Coverage %, domain breakdown, path to `docs/wiki/INDEX.md`,
    and (if step 5 ran) path to `docs/CODING_STANDARDS.md`.

@@ -305,36 +305,50 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
 4. Report the final coverage percentage
 
 
-### Stage 5: Extract Coding Standards (optional but recommended)
+### Stage 5: Codebase Analysis -- Clustering, Boundaries, Standards (recommended)
 
 After all ctx JSONs are generated, validated, and glossary confirmed,
-analyze the codebase to extract **coding standards and conventions**.
-This produces docs/CODING_STANDARDS.md — capturing HOW the code
-is written (naming, patterns, conventions), not just WHAT it does.
+run **multi-dimensional codebase analysis** to extract:
+1. **Module clusters** — functionally similar modules (by dependencies, data structures, naming)
+2. **Module boundaries** — where new code should be placed
+3. **Coding standards** — naming conventions, error handling, I-type interface priority
 
-**Steps**:
+**Use the `analyze_codebase` MCP tool** (do NOT manually analyze):
 
-1. **Read all ctx JSONs** from .ctx-cache/ctx/
-2. **Cluster modules by domain** (from skeleton domains field)
-3. **For each domain, extract patterns**:
-   - **Naming convention**: From public_api — what pattern?
-     (snake_case? CamelCase? verb-first? prefixed?)
-     List 3-5 representative function names as examples.
-   - **Error handling pattern**: From design_notes and disclosure_hint —
-     how does this domain handle errors?
-     (return errno? goto cleanup? try/catch? panic?)
-   - **Struct layout pattern**: From key_data_structures — how are structs organized?
-   - **Comment style**: From source anchors — what comment style?
-   - **Include/import pattern**: From dependencies — how declared?
-4. **Cross-cutting patterns** (all domains):
-   - Common error codes, macros, typedefs
-5. **Output** docs/CODING_STANDARDS.md with per-domain and cross-cutting sections.
-   Include examples with source anchors.
+```
+Call: analyze_codebase(
+  project_dir="<project_root>",
+  ctx_dir=".ctx-cache/ctx",
+  skeleton_path=".ctx-cache/skeleton.json",
+  out_docs="./docs"
+)
+```
 
-**If Coraline is available**, use coraline_search to find all symbols
-and analyze naming patterns statistically.
+This tool automatically:
+1. **Clusters modules** by multi-dimensional similarity:
+   - Dependency overlap (shared dependencies)
+   - Data structure overlap (shared structs/classes)
+   - Naming pattern similarity (common prefixes/suffixes)
+   → Output: `docs/MODULE_BOUNDARIES.md` with cluster definitions
 
-Save output to out_docs (default ./docs/CODING_STANDARDS.md).
+2. **Identifies I-type interfaces** (names starting with `I`):
+   - Scans all public_api and key_data_structures
+   - Finds which modules call each I-type interface
+   → Output: Interface priority rules in `docs/CODING_STANDARDS.md`
+
+3. **Extracts coding standards**:
+   - Naming conventions (per domain)
+   - Error handling patterns
+   - Module clustering recommendations
+   → Output: `docs/CODING_STANDARDS.md`
+
+**After the tool returns**:
+- Read `docs/MODULE_BOUNDARIES.md` — understand where new code should go
+- Read `docs/CODING_STANDARDS.md` — follow these conventions
+- Review `clusters` in the tool response — check if any module should be split/merged
+- Review `recommendations` — address any suggested improvements
+
+**If Coraline is available**, the tool uses Coraline data for more precise analysis.
 
 
 ## Navigating the Wiki (for AI agents using the output)
@@ -360,6 +374,9 @@ dump all modules. Instead:
 | `lookup` | Find modules by tag/domain/keyword | No |
 | `validate_coverage` | Check coverage + detect stale modules | No |
 | `assemble_docs` | Build wiki INDEX.md + cross-linked .wiki.md pages | No |
+| `analyze_codebase` | Multi-dimensional analysis: cluster modules, identify boundaries, extract coding standards (including I-type interface priority) | No* |
+
+\* `analyze_codebase` is deterministic (no LLM needed). It uses programmatic analysis of ctx JSONs.
 
 The **lookup** tool is the key innovation -- instead of reading the entire
 INDEX, an AI agent can call `lookup(skeleton_json, "policy")` to instantly
