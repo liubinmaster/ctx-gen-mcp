@@ -16,7 +16,6 @@ Usage (stdio transport, for OpenCode MCP config):
   # or: ctx-gen-server
 """
 
-__version__ = "0.6.0"  # Version for user reference
 
 from __future__ import annotations
 
@@ -31,30 +30,6 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-
-# -- Version Information ------------------------------------------------------
-def _get_version() -> str:
-    """Get version string from git commit hash.
-
-    Returns: "v0.6.0+<short_hash>" if in git repo, else "__version__"
-    """
-    import subprocess
-    try:
-        # Try to get git commit hash
-        result = subprocess.run(
-            ['git', 'rev-parse', '--short', 'HEAD'],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__))
-        )
-        if result.returncode == 0:
-            commit_hash = result.stdout.strip()
-            return f"v0.6.0+{commit_hash}"
-    except Exception:
-        pass
-    return "v0.6.0"
-
-__version__ = _get_version()
 
 
 # -- Codebase Analysis Tool --
