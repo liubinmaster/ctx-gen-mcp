@@ -62,6 +62,12 @@ You also have: `read_file`, `write_file`, `bash`, and the `ctx-gen` skill.
 **Never say "let me continue despite the error".
 If anything is unexpected, STOP and ASK the user.**
 
+6. If `needs_user_input` is `true` in the response (from `validate_coverage`):
+   → **STOP immediately**. Do NOT proceed to Stage 4.
+   → Batch-ask the user about ALL abbreviations in `glossary_prompts`.
+   → Write answers to `.ctx-cache/glossary.json`.
+   → Only after glossary is updated, proceed to Stage 4.
+
 ## Your Workflow
 
 When the user says "generate context", "create wiki", or "describe codebase":
