@@ -160,8 +160,9 @@ Only if you find **direct evidence** in the code, docs, or glossary may you
 include an explanation in the ctx JSON.
 
 **F3. No evidence found = mark as unknown, NEVER invent**:
-- In the ctx JSON, add the abbreviation to `unknown_fields`:
-  `"unknown_fields": ["abbrev: MDL (no evidence found in codebase)"]`
+- In the ctx JSON, add the abbreviation to `unknown_fields` using EXACT format:
+  `"unknown_fields": ["abbrev: MDL", "abbrev: SND_BUF"]`
+  ⚠️ **MUST use format "abbrev: ABBREV"** — `validate_coverage` parses this!
 - In the ctx JSON purpose/notes text, write: `[NEEDS VERIFICATION: MDL]`
   — do NOT write what you think it means
 - If you are tempted to write "MDL stands for Memory Descriptor List": **stop**.
@@ -174,6 +175,16 @@ or docs say so. Different projects reuse abbreviations for different things.
 
 **F5. After ALL modules generated: batch-ask user for unknown abbreviations**:
 See "Glossary Collection" below. This runs once after Stage 2, not per-module.
+
+**EXAMPLE of correct ctx JSON with unknown abbreviations**:
+```json
+{
+  "module_id": "pkt_handler",
+  "purpose": "Handle incoming packets [NEEDS VERIFICATION: MDL]",
+  "unknown_fields": ["abbrev: MDL", "abbrev: RCV_BUF"],
+  "...": "..."
+}
+```
 
 For **each module** in the skeleton:
 1. Follow the 5-step reading protocol above
