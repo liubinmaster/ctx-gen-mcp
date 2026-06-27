@@ -32,6 +32,30 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 
+# -- Version Information ------------------------------------------------------
+def _get_version() -> str:
+    """Get version string from git commit hash.
+
+    Returns: "v0.6.0+<short_hash>" if in git repo, else "__version__"
+    """
+    import subprocess
+    try:
+        # Try to get git commit hash
+        result = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        if result.returncode == 0:
+            commit_hash = result.stdout.strip()
+            return f"v0.6.0+{commit_hash}"
+    except Exception:
+        pass
+    return "v0.6.0"
+
+__version__ = _get_version()
+
 
 # -- Codebase Analysis Tool --
 try:
@@ -579,6 +603,65 @@ def scan_skeleton(project_dir: str, depth: int = 2,
             how_to_fix="Check that the project directory contains readable code files.  "
                       "This may also be a bug -- please report it."
         ) from e
+
+
+@mcp.tool()
+def version() -> dict:
+    """Return the current version of ctx-gen MCP server.
+
+    Use this to check which version you are running.
+    The version string includes the git commit hash (short form).
+
+    Returns:
+        dict with version, commit_hash, and build_info
+    """
+    import subprocess
+    import datetime
+
+    commit_hash = "unknown"
+    commit_date = "unknown"
+    is_dirty = False
+
+    try:
+        # Get full commit hash
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        if result.returncode == 0:
+            commit_hash = result.stdout.strip()
+
+        # Get commit date
+        result = subprocess.run(
+            ['git', 'log', '-1', '--format=%ci'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        if result.returncode == 0:
+            commit_date = result.stdout.strip()
+
+        # Check if working directory is dirty
+        result = subprocess.run(
+            ['git', 'status', '--porcelain'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        if result.returncode == 0:
+            is_dirty = len(result.stdout.strip()) > 0
+    except Exception:
+        pass
+
+    return {
+        "version": __version__,
+        "commit_hash": commit_hash,
+        "commit_date": commit_date,
+        "is_dirty": is_dirty,
+        "build_info": f"{__version__}" + (" (dirty)" if is_dirty else ""),
+    }
 
 
 @mcp.tool()
@@ -1513,7 +1596,10 @@ def analyze_codebase(project_dir: str, ctx_dir: str = ".ctx-cache/ctx",
 def mcp_main():
     """Entry point for `ctx-gen-server` CLI."""
     import sys
-    print(f"ctx-gen MCP server v{__version__} starting...", file=sys.stderr)
+    # Re-read version on startup (in case code was updated)
+    global __version__
+    __version__ = _get_version()
+    print(f"ctx-gen MCP server {__version__} starting...", file=sys.stderr)
     mcp.run(transport="stdio")
 
 
