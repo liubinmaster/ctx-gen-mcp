@@ -670,10 +670,21 @@ def validate_coverage(project_dir: str, ctx_dir: str,
     # call assemble_docs separately.
     wiki_result = None
     out_docs_default = str(root / "docs")
+    hallucination_warnings: list[str] = []
+    anchor_errors: list[str] = []
+
     if generated > 0:
         wiki_result = assemble_docs(str(root), str(ctx), out_docs_default)
         if wiki_result.get("errors"):
             unknown_summary["_wiki_errors"] = wiki_result["errors"]
+
+        # Run hallucination detection on every ctx JSON
+        for mid, data in existing.items():
+            hw = _detect_hallucinations(data)
+            halluccination_warnings.extend(hw)
+            # Validate source anchors against real files
+            ae = _validate_source_anchors(data, root)
+            anchor_errors.extend(ae)
 
     return {
         "total_modules": total,
@@ -682,6 +693,8 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         "missing_ids": missing,
         "stale_ids": stale,
         "unknown_fields_summary": unknown_summary,
+        "hallucination_warnings": halluccination_warnings,
+        "anchor_errors": anchor_errors,
         "wiki_auto_generated": wiki_result is not None,
         "wiki_index": wiki_result.get("index_doc", "") if wiki_result else "",
         "wiki_modules": wiki_result.get("modules_processed", 0) if wiki_result else 0,
@@ -816,28 +829,34 @@ def assemble_docs(project_dir: str, ctx_dir: str,
         #   [UNVERIFIED] -- LLM-generated, not yet reviewed
         #   [UNKNOWN]    -- LLM could not determine
         # Source anchors (line numbers) let AI trace back to verify claims.
+        # If a field has substantial text but NO source_anchor, append
+        # [⚠️ NO SOURCE] warning to alert readers of hallucination risk.
 
         badge = "VERIFIED" if ctx_verified else "UNVERIFIED"
         has_ctx = bool(ctx_data.get("purpose"))
+        anchors = ctx_data.get("source_anchors", {})
 
         lines.append("---")
-        lines.append(f"## Purpose [{badge}]")
+        # Purpose
         purpose_text = ctx_data.get("purpose", "")
+        purpose_anchors = anchors.get("purpose", [])
+        purpose_warn = ""
+        if purpose_text and purpose_text not in ("UNKNOWN", "?") and not purpose_anchors:
+            purpose_warn = " ⚠️ NO SOURCE ANCHOR"
+        lines.append(f"## Purpose [{badge}]{purpose_warn}")
         if not purpose_text or purpose_text in ("UNKNOWN", "?"):
             purpose_text = "*Run ctx-gen agent to generate context for this module.*"
         lines.append(purpose_text)
-        # Source anchor: line numbers where LLM found this info
-        anchors = ctx_data.get("source_anchors", {}).get("purpose", [])
-        if anchors:
-            lines.append(f"<!-- source: {', '.join(anchors)} -->")
+        if purpose_anchors:
+            lines.append(f"<!-- source: {', '.join(purpose_anchors)} -->")
         lines.append("")
 
+        # Public API
         lines.append(f"## Public API [{badge}]")
         pub_api = ctx_data.get("public_api", [])
         if pub_api:
-            api_anchors = ctx_data.get("source_anchors", {}).get("public_api", {})
-            for i, fn in enumerate(pub_api):
-                # Try matching with and without trailing ()
+            api_anchors = anchors.get("public_api", {})
+            for fn in pub_api:
                 fn_base = fn.rstrip("()")
                 anchor = api_anchors.get(fn, "") or api_anchors.get(fn_base, "")
                 if anchor:
@@ -848,32 +867,44 @@ def assemble_docs(project_dir: str, ctx_dir: str,
             lines.append("*Not yet generated.*")
         lines.append("")
 
+        # Key Data Structures
         lines.append(f"## Key Data Structures [{badge}]")
         kds = ctx_data.get("key_data_structures", [])
         if kds:
-            kds_anchors = ctx_data.get("source_anchors", {}).get("key_data_structures", {})
+            kds_anchors = anchors.get("key_data_structures", {})
             for ds in kds:
-                lines.append(f"### {ds.get('name', '?')}")
+                name = ds.get("name", "?")
+                lines.append(f"### {name}")
                 lines.append(ds.get("description", ""))
-                anchor = kds_anchors.get(ds.get("name", ""), "")
+                anchor = kds_anchors.get(name, "")
                 if anchor:
                     lines.append(f"<!-- source: {anchor} -->")
+                elif ds.get("description", "") and len(ds.get("description", "")) > 20:
+                    lines.append("<!-- ⚠️ NO SOURCE ANCHOR for this description -->")
         else:
             lines.append("*Not yet generated.*")
         lines.append("")
 
-        lines.append(f"## Design Notes [{badge}]")
+        # Design Notes
         notes = ctx_data.get("design_notes", "")
+        notes_anchors = anchors.get("design_notes", [])
+        notes_warn = ""
+        if notes and notes not in ("UNKNOWN", "?", "") and not notes_anchors:
+            notes_warn = " ⚠️ NO SOURCE ANCHOR"
+        lines.append(f"## Design Notes [{badge}]{notes_warn}")
         if not notes or notes in ("UNKNOWN", "?", ""):
             notes = "*Not yet generated.*"
         lines.append(notes)
-        dn_anchors = ctx_data.get("source_anchors", {}).get("design_notes", [])
-        if dn_anchors:
-            lines.append(f"<!-- source: {', '.join(dn_anchors)} -->")
+        if notes_anchors:
+            lines.append(f"<!-- source: {', '.join(notes_anchors)} -->")
         lines.append("")
 
-        lines.append(f"## Disclosure Hint [{badge}]")
+        # Disclosure Hint
         hint = ctx_data.get("disclosure_hint", "")
+        hint_warn = ""
+        if hint and hint not in ("UNKNOWN", "?", "") and not anchors.get("disclosure_hint", []):
+            hint_warn = " ⚠️ NO SOURCE ANCHOR"
+        lines.append(f"## Disclosure Hint [{badge}]{hint_warn}")
         if not hint or hint in ("UNKNOWN", "?", ""):
             hint = "*Not yet generated.*"
         lines.append(f"> {hint}")
@@ -978,6 +1009,112 @@ def dep_domain(module_id: str, skeleton: dict) -> str:
         if m["id"] == module_id:
             return m.get("domain", "_root")
     return "_root"
+
+
+# -- Hallucination Detection ---------------------------------------------------
+
+_HALLUCINATION_PATTERNS = [
+    # Chinese: "X 表示 Y" / "X 是 Y 的缩写" / "X 代表 Y"
+    re.compile(r'[\u4e00-\u9fff]+\s*(表示|是.*缩写|代表)\s*[\u4e00-\u9fff]+', re.IGNORECASE),
+    # English: "X stands for Y" / "X is a Y" / "X means Y"
+    re.compile(r'\bstands\s+for\b', re.IGNORECASE),
+    re.compile(r'\bis\s+a\s+[A-Z][a-z]+\b', re.IGNORECASE),
+    re.compile(r'\bmeans\s+[a-z]+', re.IGNORECASE),
+    # Common hallucinated patterns
+    re.compile(r'\b(abbreviation|acronym)\s+(for|of)\b', re.IGNORECASE),
+]
+
+
+def _detect_hallucinations(ctx_data: dict) -> list[str]:
+    """Scan ctx JSON for hallucination risks.
+
+    Returns a list of warning strings.
+    """
+    warnings: list[str] = []
+    anchors = ctx_data.get("source_anchors", {})
+    mid = ctx_data.get("module_id", "unknown")
+
+    # 1. Fields with substantial text but NO source anchor
+    text_fields = {
+        "purpose": ctx_data.get("purpose", ""),
+        "design_notes": ctx_data.get("design_notes", ""),
+        "disclosure_hint": ctx_data.get("disclosure_hint", ""),
+    }
+    anchor_fields = {
+        "purpose": anchors.get("purpose", []),
+        "design_notes": anchors.get("design_notes", []),
+        "disclosure_hint": anchors.get("design_notes", []),  # often in design_notes anchor
+    }
+    for field_name, text in text_fields.items():
+        if not text or text in ("UNKNOWN", "?", ""):
+            continue
+        if len(text) > 30 and not anchor_fields.get(field_name):
+            warnings.append(
+                f"[{mid}] Field `{field_name}` has {len(text)} chars of text "
+                f"but NO source_anchor -- likely hallucinated."
+            )
+
+    # 2. Scan text for abbreviation explanation patterns without anchors
+    combined_text = " ".join(str(v) for v in text_fields.values() if v)
+    for pattern in _HALLUCINATION_PATTERNS:
+        for match in pattern.finditer(combined_text):
+            # Check if this match area has a nearby source anchor comment
+            # (simple heuristic: if anchors exist for this field, OK; else warn)
+            warnings.append(
+                f"[{mid}] Possible abbreviation explanation detected: "
+                f"...{match.group(0)[:60]}... -- verify with source code."
+            )
+
+    # 3. unknown_fields entries with "abbrev:" prefix -> user needs to verify
+    unknown = ctx_data.get("unknown_fields", [])
+    abbrev_unknown = [u for u in unknown if "abbrev" in str(u).lower()]
+    for au in abbrev_unknown:
+        warnings.append(f"[{mid}] Unverified abbreviation: {au}")
+
+    return warnings
+
+
+def _validate_source_anchors(ctx_data: dict, root: Path) -> list[str]:
+    """Validate that source_anchors refer to real files and line numbers.
+
+    Returns a list of error strings (empty = all anchors valid).
+    """
+    errors: list[str] = []
+    anchors = ctx_data.get("source_anchors", {})
+    mid = ctx_data.get("module_id", "unknown")
+
+    all_anchor_refs: list[str] = []
+    for v in anchors.values():
+        if isinstance(v, list):
+            all_anchor_refs.extend(v)
+        elif isinstance(v, dict):
+            all_anchor_refs.extend(v.values())
+
+    for ref in all_anchor_refs:
+        ref_str = str(ref)
+        # Parse "file:line" or "file:line_start-line_end"
+        m = re.match(r'^([^:]+):(\d+)(?:-(\d+))?$', ref_str)
+        if not m:
+            errors.append(f"[{mid}] Invalid source_anchor format: `{ref_str}`")
+            continue
+        file_rel = m.group(1)
+        line_num = int(m.group(2))
+        file_path = root / file_rel
+        if not file_path.exists():
+            errors.append(f"[{mid}] source_anchor references non-existent file: `{file_rel}`")
+            continue
+        # Check line number is within file bounds
+        try:
+            total_lines = _count_lines(file_path)
+            if line_num > total_lines + 5:  # allow small offset
+                errors.append(
+                    f"[{mid}] source_anchor line {line_num} exceeds file length "
+                    f"({total_lines} lines) in `{file_rel}`"
+                )
+        except Exception:
+            pass  # skip if can't read
+
+    return errors
 
 
 def mcp_main():

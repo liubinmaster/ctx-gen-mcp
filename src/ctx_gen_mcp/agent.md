@@ -63,6 +63,11 @@ When the user says "generate context", "create wiki", or "describe codebase":
 - **`module_id` MUST exactly match the `id` from skeleton** -- do NOT invent
   IDs from file names. skeleton says `"id": "engine"` → write `"module_id": "engine"`.
   If module_id doesn't match, the wiki page will be empty.
+- **NEVER guess or explain an abbreviation.** If you see `MDL`, `IRP`, `RCV_BUF`
+  or any ALL_CAPS / short identifier, search the code for a comment that explains it
+  (e.g. `/* MDL = ... */`). If no evidence exists in the codebase, write
+  `[NEEDS_VERIFICATION: <abbrev>]` and list it in `unknown_fields`.
+  **Do NOT write what you think it means -- that is hallucination.**
 - NEVER guess a field value -- write `"UNKNOWN"` if uncertain
 - `purpose` must be >= 50 chars and answer "This module exists to ___"
   Bad: `"Core engine module"` | Good: `"Provides the DFA-based rule evaluation engine that matches file content against configured regex patterns in kernel-mode"`

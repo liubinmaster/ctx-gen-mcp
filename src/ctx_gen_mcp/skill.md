@@ -91,7 +91,39 @@ Find the main struct/class that this module centers around.
 Look for: typedef struct, dataclass, Protocol class, interface declaration.
 Write its name and a 1-sentence description of what it represents.
 
-After completing steps A-E, generate the JSON:
+#### Step F — Acronym / Abbreviation Verification (CRITICAL, anti-hallucination)
+Codebases often contain abbreviations (ALL_CAPS identifiers, short names like
+`ctx`, `rcv`, `snd`, `pkt`, `hdr`, `mpls`, `irdp`). **LLMs tend to
+confidently invent explanations for abbreviations they do not understand.**
+Follow this protocol strictly:
+
+**F1. Collect all abbreviations** in the module:
+- ALL_CAPS identifiers: `MDL`, `IRP`, `SND_BUF`, `RCV_QUEUE`, `MAX_RETRIES`
+- Short lowercase names: `ctx`, `pkt`, `hdr`, `req`, `rsp`, `cfg`, `impl`
+- Macro names, enum prefixes, typedef shorthands
+
+**F2. Search for evidence BEFORE explaining any abbreviation**:
+For each abbreviation, search the codebase (use grep/read_file) for:
+1. A comment that explains it: `/* MDL = Memory Descriptor List */`, `# IRP: I/O Request Packet`
+2. A doc file: `docs/terminology.md`, `README`, `DESIGN.md` mentioning it
+3. A string constant or `#define` that expands it
+4. A variable/struct name that is the "expanded form": e.g. finding `memory_descriptor_list` elsewhere confirms `MDL`
+Only if you find **direct evidence** in the code or docs may you include an
+explanation in the ctx JSON.
+
+**F3. No evidence found = mark as unknown, NEVER invent**:
+- In the ctx JSON, add the abbreviation to `unknown_fields`:
+  `"unknown_fields": ["abbrev: MDL (no evidence found in codebase)"]`
+- In the wiki text, write: `[NEEDS VERIFICATION: MDL]` — do NOT write what you think it means
+- If you are tempted to write "MDL stands for Memory Descriptor List": **stop**.
+  That is hallucination unless the code itself contains that explanation.
+
+**F4. Known-domain knowledge is still hallucination if not in THIS codebase**:
+Even if you (the LLM) "know" that `IRP` means I/O Request Packet in Windows
+drivers, you MUST NOT write that in the ctx JSON unless the project's own code
+or docs say so. Different projects reuse abbreviations for different things.
+
+After completing steps A-F, generate the JSON:
 
 For **each module** in the skeleton:
 1. Follow the 5-step reading protocol above
@@ -153,6 +185,9 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
      Bad: `"Core engine module"`  Good: `"Call engine_init() before run_engine(), not thread-safe"`
    - `design_notes` must contain at least 1 concrete architectural decision or constraint
    - **Every claim must have a source anchor** -- cite `file:line` where you read it
+   - **NEVER explain an abbreviation unless you found its definition in the code/docs.**
+     Writing "X stands for Y" without a source anchor is hallucination.
+     When in doubt, write `[NEEDS_VERIFICATION: X]` and list X in `unknown_fields`.
    - If you cannot find a source line for a claim, put it in `unknown_fields`
    - Always set `"verified": false` -- only humans can mark it `true`
    - Save each module JSON to `.ctx-cache/ctx/<module_id>.json`
