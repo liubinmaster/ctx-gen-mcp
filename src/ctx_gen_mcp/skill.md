@@ -77,6 +77,26 @@ Do NOT invent module IDs from file names or function names.
 The skeleton says `"id": "src"` → your JSON must have `"module_id": "src"`.
 If you use a different name the wiki page will show empty content.
 
+
+**Optional: Use Coraline MCP for precise code analysis**
+If Coraline MCP tools (coraline_*) are available in your tool list, query
+Coraline first to get precise function signatures and call graphs.
+This significantly improves public_api, dependencies, and disclosure_hint accuracy.
+
+Before processing each module, run these Coraline queries:
+1. coraline_get_symbols_overview(file_path="<module_entry_file>")
+   → get all symbols (functions, structs, classes) in the module
+2. coraline_node(name="<func_name>", file="<file>") for each public function
+   → get exact function signature (from source, not LLM inference)
+3. coraline_callers(name="<func_name>", file="<file>") and
+   coraline_callees(name="<func_name>", file="<file>")
+   → get precise call graph for dependencies and disclosure_hint
+4. coraline_search(query="<module_name>", kind="module")
+   → verify module boundary
+
+Use these facts to write ctx JSON fields. If Coraline is not available,
+proceed with the 5-step reading protocol below.
+
 For **each module** in the skeleton, follow this **5-step reading protocol**:
 
 #### Step A — Identify entry point
@@ -283,6 +303,39 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
    - `docs/wiki/domains/<domain>/<module>.wiki.md` -- cross-linked pages
 3. **Verify**: Confirm `docs/wiki/INDEX.md` exists. If not, `assemble_docs` failed -- check errors.
 4. Report the final coverage percentage
+
+
+### Stage 5: Extract Coding Standards (optional but recommended)
+
+After all ctx JSONs are generated, validated, and glossary confirmed,
+analyze the codebase to extract **coding standards and conventions**.
+This produces docs/CODING_STANDARDS.md — capturing HOW the code
+is written (naming, patterns, conventions), not just WHAT it does.
+
+**Steps**:
+
+1. **Read all ctx JSONs** from .ctx-cache/ctx/
+2. **Cluster modules by domain** (from skeleton domains field)
+3. **For each domain, extract patterns**:
+   - **Naming convention**: From public_api — what pattern?
+     (snake_case? CamelCase? verb-first? prefixed?)
+     List 3-5 representative function names as examples.
+   - **Error handling pattern**: From design_notes and disclosure_hint —
+     how does this domain handle errors?
+     (return errno? goto cleanup? try/catch? panic?)
+   - **Struct layout pattern**: From key_data_structures — how are structs organized?
+   - **Comment style**: From source anchors — what comment style?
+   - **Include/import pattern**: From dependencies — how declared?
+4. **Cross-cutting patterns** (all domains):
+   - Common error codes, macros, typedefs
+5. **Output** docs/CODING_STANDARDS.md with per-domain and cross-cutting sections.
+   Include examples with source anchors.
+
+**If Coraline is available**, use coraline_search to find all symbols
+and analyze naming patterns statistically.
+
+Save output to out_docs (default ./docs/CODING_STANDARDS.md).
+
 
 ## Navigating the Wiki (for AI agents using the output)
 
