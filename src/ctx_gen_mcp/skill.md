@@ -108,13 +108,16 @@ For each abbreviation, search the codebase (use grep/read_file) for:
 2. A doc file: `docs/terminology.md`, `README`, `DESIGN.md` mentioning it
 3. A string constant or `#define` that expands it
 4. A variable/struct name that is the "expanded form": e.g. finding `memory_descriptor_list` elsewhere confirms `MDL`
-Only if you find **direct evidence** in the code or docs may you include an
-explanation in the ctx JSON.
+5. **Check `.ctx-cache/glossary.json`** (project glossary). If the abbreviation
+   has a confirmed entry, use it and set `source_anchor` to `"glossary:user-confirmed"`.
+Only if you find **direct evidence** in the code, docs, or glossary may you
+include an explanation in the ctx JSON.
 
 **F3. No evidence found = mark as unknown, NEVER invent**:
 - In the ctx JSON, add the abbreviation to `unknown_fields`:
   `"unknown_fields": ["abbrev: MDL (no evidence found in codebase)"]`
-- In the wiki text, write: `[NEEDS VERIFICATION: MDL]` — do NOT write what you think it means
+- In the ctx JSON purpose/notes text, write: `[NEEDS VERIFICATION: MDL]`
+  — do NOT write what you think it means
 - If you are tempted to write "MDL stands for Memory Descriptor List": **stop**.
   That is hallucination unless the code itself contains that explanation.
 
@@ -123,7 +126,8 @@ Even if you (the LLM) "know" that `IRP` means I/O Request Packet in Windows
 drivers, you MUST NOT write that in the ctx JSON unless the project's own code
 or docs say so. Different projects reuse abbreviations for different things.
 
-After completing steps A-F, generate the JSON:
+**F5. After ALL modules generated: batch-ask user for unknown abbreviations**:
+See "Glossary Collection" below. This runs once after Stage 2, not per-module.
 
 For **each module** in the skeleton:
 1. Follow the 5-step reading protocol above
@@ -193,6 +197,67 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
    - Save each module JSON to `.ctx-cache/ctx/<module_id>.json`
    - **Quality check before saving**: re-read your JSON. If `purpose` could describe
      ANY module in the project, rewrite it to be specific to THIS module.
+
+### Stage 2.5: Glossary Collection (NEW — run ONCE after Stage 2)
+
+After generating ALL module ctx JSONs, collect and confirm unknown abbreviations
+with the user. This produces a project glossary that eliminates hallucination
+in future runs.
+
+**Steps**:
+
+1. **Collect**: Scan all `.ctx-cache/ctx/*.json` for `unknown_fields` entries
+   starting with `abbrev:`. Build a de-duped list:
+   ```python
+   unknown_abbrevs = set()
+   for jf in ctx_dir.glob("*.json"):
+       data = json.loads(jf.read_text())
+       for uf in data.get("unknown_fields", []):
+           if uf.startswith("abbrev:"):
+               # extract abbrev name: "abbrev: MDL (...)" -> "MDL"
+               name = uf.split(":")[1].split(" ")[0]
+               unknown_abbrevs.add(name)
+   ```
+
+2. **Check glossary**: Filter out any that are already in `.ctx-cache/glossary.json`.
+
+3. **Batch ask the user** (if any remain):
+   Use `AskUserQuestion` ONCE with all unknown abbreviations listed:
+   ```
+   "I found these abbreviations in the codebase that I couldn't explain
+   from comments or docs. Do you know what they stand for?
+
+   - MDL: ?
+   - RCV_BUF: ?
+   - SND_Q: ?
+
+   (You can answer 'unknown' for any you don't know.)"
+   ```
+   **Do NOT ask one-by-one** — batch them to respect user attention.
+
+4. **Record answers**: Write to `.ctx-cache/glossary.json`:
+   ```json
+   {
+     "MDL": {
+       "meaning": "Memory Descriptor List",
+       "confirmed_by": "user",
+       "date": "2026-06-27"
+     },
+     "RCV_BUF": {"meaning": "receive buffer", "confirmed_by": "user"}
+   }
+   ```
+   For abbreviations the user doesn't know, write `"meaning": "[UNKNOWN]"`
+   (this prevents re-asking in future runs).
+
+5. **Re-render wiki**: Call `assemble_docs` again. It now loads the glossary
+   and replaces `[NEEDS VERIFICATION: MDL]` with the confirmed meaning
+   (marked with `[GLOSSARY]` badge instead of `[UNVERIFIED]`).
+
+**Glossary file guidance**:
+- `.ctx-cache/glossary.json` is **project knowledge** — consider committing it
+  to the repo (unlike `.ctx-cache/skeleton.json` which is a build artifact).
+- If the project already has `docs/terminology.md` or similar, parse it and
+  pre-fill the glossary before Stage 2.
 
 ### Stage 3: Validate (use MCP tool `validate_coverage`)
 1. Call `validate_coverage` with `project_dir` and `ctx_dir=".ctx-cache/ctx"`

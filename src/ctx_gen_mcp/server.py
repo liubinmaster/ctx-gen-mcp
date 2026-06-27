@@ -652,6 +652,23 @@ def validate_coverage(project_dir: str, ctx_dir: str,
     total = skeleton.get("total_modules", 0)
     pct = round(generated / total * 100, 1) if total > 0 else 0.0
 
+    # Load project glossary for stats
+    glossary_count = 0
+    glossary_path = root / ".ctx-cache" / "glossary.json"
+    if glossary_path.exists():
+        try:
+            raw = json.loads(glossary_path.read_text(encoding="utf-8"))
+            for v in raw.values():
+                meaningful = False
+                if isinstance(v, str) and v != "[UNKNOWN]":
+                    meaningful = True
+                elif isinstance(v, dict) and v.get("meaning", "") != "[UNKNOWN]":
+                    meaningful = True
+                if meaningful:
+                    glossary_count += 1
+        except Exception:
+            pass
+
     missing = [mid for mid in modules if mid not in existing]
     stale: list[str] = []
     unknown_summary: dict[str, list[str]] = {}
@@ -693,7 +710,8 @@ def validate_coverage(project_dir: str, ctx_dir: str,
         "missing_ids": missing,
         "stale_ids": stale,
         "unknown_fields_summary": unknown_summary,
-        "hallucination_warnings": halluccination_warnings,
+        "glossary_count": glossary_count,
+        "hallucination_warnings": hallucination_warnings,
         "anchor_errors": anchor_errors,
         "wiki_auto_generated": wiki_result is not None,
         "wiki_index": wiki_result.get("index_doc", "") if wiki_result else "",
@@ -726,6 +744,37 @@ def assemble_docs(project_dir: str, ctx_dir: str,
 
     name = project_name or root.name or "Project"
     existing = _list_existing_contexts(ctx)
+
+    # Load project glossary (user-confirmed abbreviation explanations)
+    glossary: dict = {}
+    glossary_path = root / ".ctx-cache" / "glossary.json"
+    if glossary_path.exists():
+        try:
+            raw = json.loads(glossary_path.read_text(encoding="utf-8"))
+            # Support both simple format {"MDL": "meaning"} and detailed format
+            # {"MDL": {"meaning": "...", ...}}
+            for k, v in raw.items():
+                if isinstance(v, str):
+                    glossary[k.upper()] = v
+                elif isinstance(v, dict) and "meaning" in v:
+                    glossary[k.upper()] = v["meaning"]
+        except Exception:
+            pass
+
+    def _apply_glossary(text: str) -> tuple[str, list[str]]:
+        """Replace `[NEEDS VERIFICATION: X]` tokens with glossary entries.
+
+        Returns (updated_text, list_of_glossary_hits).
+        """
+        if not text or not glossary:
+            return text, []
+        hits: list[str] = []
+        for abbrev, meaning in glossary.items():
+            token = f"[NEEDS VERIFICATION: {abbrev}]"
+            if token in text and meaning != "[UNKNOWN]":
+                text = text.replace(token, f"`{abbrev}` = {meaning}  [GLOSSARY]")
+                hits.append(abbrev)
+        return text, hits
 
     # Re-scan to get domain/tag info
     skeleton = _scan_repo(root, depth=2, code_only=True)
@@ -839,14 +888,18 @@ def assemble_docs(project_dir: str, ctx_dir: str,
         lines.append("---")
         # Purpose
         purpose_text = ctx_data.get("purpose", "")
+        purpose_text, glos_hits = _apply_glossary(purpose_text)
         purpose_anchors = anchors.get("purpose", [])
         purpose_warn = ""
-        if purpose_text and purpose_text not in ("UNKNOWN", "?") and not purpose_anchors:
+        if purpose_text and purpose_text not in ("UNKNOWN", "?") and not purpose_anchors and not glos_hits:
             purpose_warn = " ⚠️ NO SOURCE ANCHOR"
-        lines.append(f"## Purpose [{badge}]{purpose_warn}")
+        badge_g = badge if not glos_hits else "GLOSSARY"
+        lines.append(f"## Purpose [{badge_g}]{purpose_warn}")
         if not purpose_text or purpose_text in ("UNKNOWN", "?"):
             purpose_text = "*Run ctx-gen agent to generate context for this module.*"
         lines.append(purpose_text)
+        if glos_hits:
+            lines.append(f"<!-- Glossary resolved: {', '.join(glos_hits)} -->")
         if purpose_anchors:
             lines.append(f"<!-- source: {', '.join(purpose_anchors)} -->")
         lines.append("")
@@ -874,12 +927,14 @@ def assemble_docs(project_dir: str, ctx_dir: str,
             kds_anchors = anchors.get("key_data_structures", {})
             for ds in kds:
                 name = ds.get("name", "?")
+                desc = ds.get("description", "")
+                desc, _ = _apply_glossary(desc)
                 lines.append(f"### {name}")
-                lines.append(ds.get("description", ""))
+                lines.append(desc)
                 anchor = kds_anchors.get(name, "")
                 if anchor:
                     lines.append(f"<!-- source: {anchor} -->")
-                elif ds.get("description", "") and len(ds.get("description", "")) > 20:
+                elif desc and len(desc) > 20 and not _[1]:
                     lines.append("<!-- ⚠️ NO SOURCE ANCHOR for this description -->")
         else:
             lines.append("*Not yet generated.*")
@@ -887,27 +942,35 @@ def assemble_docs(project_dir: str, ctx_dir: str,
 
         # Design Notes
         notes = ctx_data.get("design_notes", "")
+        notes, notes_glos_hits = _apply_glossary(notes)
         notes_anchors = anchors.get("design_notes", [])
         notes_warn = ""
-        if notes and notes not in ("UNKNOWN", "?", "") and not notes_anchors:
+        if notes and notes not in ("UNKNOWN", "?", "") and not notes_anchors and not notes_glos_hits:
             notes_warn = " ⚠️ NO SOURCE ANCHOR"
-        lines.append(f"## Design Notes [{badge}]{notes_warn}")
+        badge_g2 = badge if not notes_glos_hits else "GLOSSARY"
+        lines.append(f"## Design Notes [{badge_g2}]{notes_warn}")
         if not notes or notes in ("UNKNOWN", "?", ""):
             notes = "*Not yet generated.*"
         lines.append(notes)
+        if notes_glos_hits:
+            lines.append(f"<!-- Glossary resolved: {', '.join(notes_glos_hits)} -->")
         if notes_anchors:
             lines.append(f"<!-- source: {', '.join(notes_anchors)} -->")
         lines.append("")
 
         # Disclosure Hint
         hint = ctx_data.get("disclosure_hint", "")
+        hint, hint_glos_hits = _apply_glossary(hint)
         hint_warn = ""
-        if hint and hint not in ("UNKNOWN", "?", "") and not anchors.get("disclosure_hint", []):
+        if hint and hint not in ("UNKNOWN", "?", "") and not anchors.get("disclosure_hint", []) and not hint_glos_hits:
             hint_warn = " ⚠️ NO SOURCE ANCHOR"
-        lines.append(f"## Disclosure Hint [{badge}]{hint_warn}")
+        badge_g3 = badge if not hint_glos_hits else "GLOSSARY"
+        lines.append(f"## Disclosure Hint [{badge_g3}]{hint_warn}")
         if not hint or hint in ("UNKNOWN", "?", ""):
             hint = "*Not yet generated.*"
         lines.append(f"> {hint}")
+        if hint_glos_hits:
+            lines.append(f"<!-- Glossary resolved: {', '.join(hint_glos_hits)} -->")
         lines.append("")
 
         wiki_path = dom_dir / f"{mid}.wiki.md"
@@ -988,6 +1051,18 @@ def assemble_docs(project_dir: str, ctx_dir: str,
                 f"{m.get('total_lines', 0)} | "
                 f"`{entry}` | {purpose} | {tags_str} |"
             )
+        idx_lines.append("")
+
+    # Glossary section (if project has one)
+    if glossary:
+        idx_lines.append("## Project Glossary")
+        idx_lines.append(
+            "> Confirmed abbreviation expansions "
+            "(sourced from `.ctx-cache/glossary.json`).\n"
+        )
+        for abbrev, meaning in sorted(glossary.items()):
+            if meaning != "[UNKNOWN]":
+                idx_lines.append(f"- **`{abbrev}`**: {meaning}")
         idx_lines.append("")
 
     idx_path = wiki_dir / "INDEX.md"

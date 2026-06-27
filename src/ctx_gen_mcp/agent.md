@@ -45,10 +45,17 @@ When the user says "generate context", "create wiki", or "describe codebase":
    data structures), then produce a JSON context object. Quality check before saving:
    if `purpose` could describe ANY module, rewrite it to be specific.
    Save each to `.ctx-cache/ctx/<module_id>.json`.
-3. **Validate**: Call `validate_coverage(project_dir=".", ctx_dir=".ctx-cache/ctx")`
+   **NEW**: Before explaining any abbreviation, check `.ctx-cache/glossary.json`
+   (see skill Step F5).
+3. **Glossary Collection (NEW)**: After ALL modules are generated, scan
+   `unknown_fields` in every ctx JSON for `"abbrev:"` entries. Deduplicate.
+   If any unknown abbreviations remain, batch-ask the user via `AskUserQuestion`.
+   Write answers to `.ctx-cache/glossary.json`.
+   Re-run `assemble_docs` to update wiki pages with confirmed explanations.
+4. **Validate**: Call `validate_coverage(project_dir=".", ctx_dir=".ctx-cache/ctx")`
    -> if missing modules, repeat step 2.
-4. **Assemble**: Call `assemble_docs(project_dir=".", ctx_dir=".ctx-cache/ctx", out_docs="./docs")`
-5. **Report**: Coverage %, domain breakdown, and path to `docs/wiki/INDEX.md`.
+5. **Assemble**: Call `assemble_docs(project_dir=".", ctx_dir=".ctx-cache/ctx", out_docs="./docs")`
+6. **Report**: Coverage %, domain breakdown, and path to `docs/wiki/INDEX.md`.
 
 ## CRITICAL: Output File Rules
 
