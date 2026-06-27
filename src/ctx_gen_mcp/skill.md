@@ -51,8 +51,50 @@ Do NOT invent module IDs from file names or function names.
 The skeleton says `"id": "src"` → your JSON must have `"module_id": "src"`.
 If you use a different name the wiki page will show empty content.
 
+For **each module** in the skeleton, follow this **5-step reading protocol**:
+
+#### Step A — Identify entry point
+Read the entry file first (from skeleton `entry` field).
+If entry is empty, check for: `main.c`, `main.py`, `__init__.py`, `index.ts`, `mod.rs`.
+If none, read the file with the most exported symbols (biggest .h/.pyi file).
+
+#### Step B — Scan all headers / interfaces
+For C/C++: read every `.h` / `.hpp` file in the module dir.
+For Python: read `__init__.py` and any file with `class`/`def` at module level.
+For TypeScript: read `index.ts` and `.d.ts` files.
+**Goal**: Build a complete list of public functions/classes with their signatures.
+This is the `public_api` field. Write EXACT signatures, not just names.
+Bad: `"rule_add"` | Good: `"rule_add(name: str, pattern: str, action: int) -> int"`
+
+#### Step C — Find the "why" (purpose)
+Look for:
+1. Top-of-file doc comments (/* Module: ... */, """ ... """, # ...)
+2. README.md or DESIGN.md in the module directory
+3. First function in entry file -- what does it initialize/start?
+4. CMakeLists.txt / BUILD target description
+Write `purpose` as 1-2 sentences answering: "This module exists to ___."
+Minimum 50 chars. If you can't find a clear answer, say what the entry function does.
+
+#### Step D — Find design constraints (disclosure_hint)
+These are the things that will BREAK if an AI agent ignores them.
+Look for:
+1. Comments starting with "IMPORTANT:", "NOTE:", "WARNING:", "FIXME:", "HACK:"
+2. Global state / singletons that must be initialized first
+3. Thread safety notes, lock ordering requirements
+4. Protocol/wire format constraints (magic numbers, version fields)
+5. Memory ownership rules (caller vs callee frees)
+Write `disclosure_hint` as: "Before editing, know: ___"
+This is the MOST important field -- an AI agent reads it first before touching anything.
+
+#### Step E — Trace key data structures
+Find the main struct/class that this module centers around.
+Look for: typedef struct, dataclass, Protocol class, interface declaration.
+Write its name and a 1-sentence description of what it represents.
+
+After completing steps A-E, generate the JSON:
+
 For **each module** in the skeleton:
-1. Read the module's source files (use `read_file` tool, start with entry file)
+1. Follow the 5-step reading protocol above
 2. Generate a JSON object matching this **exact schema**:
 
 ```json
@@ -102,14 +144,20 @@ reading the cited lines. Without anchors, descriptions are untrustworthy.
 - The wiki renderer shows `[UNVERIFIED]` badge for `false`, `[VERIFIED]` for `true`
 
 3. **CRITICAL RULES**:
-   - If you cannot determine a field, write `"UNKNOWN"` -- do NOT guess
-   - `purpose` must be >= 30 characters
-   - `public_api` must list actual function/method signatures, not just names
-   - `disclosure_hint` is the **most important field** for progressive disclosure
+   - If you cannot determine a field, write `"UNKNOWN"` -- do NOT guess or paraphrase
+   - `purpose` must be >= 50 chars and answer "This module exists to ___"
+   - `public_api` must list EXACT signatures from source, not just names
+     Bad: `["run_engine"]`  Good: `["run_engine(ctx: engine_ctx_t*) -> int"]`
+   - `disclosure_hint` is the **most important field** -- must be >= 30 chars,
+     describe what breaks if you ignore it, not just what the module does
+     Bad: `"Core engine module"`  Good: `"Call engine_init() before run_engine(), not thread-safe"`
+   - `design_notes` must contain at least 1 concrete architectural decision or constraint
    - **Every claim must have a source anchor** -- cite `file:line` where you read it
    - If you cannot find a source line for a claim, put it in `unknown_fields`
    - Always set `"verified": false` -- only humans can mark it `true`
    - Save each module JSON to `.ctx-cache/ctx/<module_id>.json`
+   - **Quality check before saving**: re-read your JSON. If `purpose` could describe
+     ANY module in the project, rewrite it to be specific to THIS module.
 
 ### Stage 3: Validate (use MCP tool `validate_coverage`)
 1. Call `validate_coverage` with `project_dir` and `ctx_dir=".ctx-cache/ctx"`

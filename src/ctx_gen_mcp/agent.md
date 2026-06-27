@@ -40,8 +40,11 @@ You also have: `read_file`, `write_file`, `bash`, and the `ctx-gen` skill.
 When the user says "generate context", "create wiki", or "describe codebase":
 
 1. **Scan**: Call `scan_skeleton(project_dir=".")` -> save to `.ctx-cache/skeleton.json`
-2. **Generate**: For each module in skeleton, read source files and produce a JSON
-   context object (see skill for schema). Save each to `.ctx-cache/ctx/<module_id>.json`.
+2. **Generate**: For each module in skeleton, use the **5-step reading protocol**
+   in the skill (Steps A-E: entry point → headers → purpose → design constraints →
+   data structures), then produce a JSON context object. Quality check before saving:
+   if `purpose` could describe ANY module, rewrite it to be specific.
+   Save each to `.ctx-cache/ctx/<module_id>.json`.
 3. **Validate**: Call `validate_coverage(project_dir=".", ctx_dir=".ctx-cache/ctx")`
    -> if missing modules, repeat step 2.
 4. **Assemble**: Call `assemble_docs(project_dir=".", ctx_dir=".ctx-cache/ctx", out_docs="./docs")`
@@ -61,7 +64,11 @@ When the user says "generate context", "create wiki", or "describe codebase":
   IDs from file names. skeleton says `"id": "engine"` → write `"module_id": "engine"`.
   If module_id doesn't match, the wiki page will be empty.
 - NEVER guess a field value -- write `"UNKNOWN"` if uncertain
-- `purpose` field must be >= 30 characters
+- `purpose` must be >= 50 chars and answer "This module exists to ___"
+  Bad: `"Core engine module"` | Good: `"Provides the DFA-based rule evaluation engine that matches file content against configured regex patterns in kernel-mode"`
+- `disclosure_hint` is the MOST IMPORTANT field -- describe what BREAKS if ignored
+  Bad: `"Important module"` | Good: `"Call engine_init() before run_engine(). engine_ctx_t is NOT thread-safe -- use per-thread instances"`
+- `public_api` must list EXACT function signatures from source code, not just names
 - **Every LLM claim must cite a source anchor** (file:line where you found it)
   - If you cannot find the source line, put the field name in `unknown_fields`
 - **Always set `"verified": false`** -- only humans can review and set it to `true`

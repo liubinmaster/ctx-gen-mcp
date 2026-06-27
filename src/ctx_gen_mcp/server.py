@@ -822,7 +822,9 @@ def assemble_docs(project_dir: str, ctx_dir: str,
 
         lines.append("---")
         lines.append(f"## Purpose [{badge}]")
-        purpose_text = ctx_data.get("purpose", "*Run ctx-gen agent to generate.*")
+        purpose_text = ctx_data.get("purpose", "")
+        if not purpose_text or purpose_text in ("UNKNOWN", "?"):
+            purpose_text = "*Run ctx-gen agent to generate context for this module.*"
         lines.append(purpose_text)
         # Source anchor: line numbers where LLM found this info
         anchors = ctx_data.get("source_anchors", {}).get("purpose", [])
@@ -861,7 +863,9 @@ def assemble_docs(project_dir: str, ctx_dir: str,
         lines.append("")
 
         lines.append(f"## Design Notes [{badge}]")
-        notes = ctx_data.get("design_notes", "*Not yet generated.*")
+        notes = ctx_data.get("design_notes", "")
+        if not notes or notes in ("UNKNOWN", "?", ""):
+            notes = "*Not yet generated.*"
         lines.append(notes)
         dn_anchors = ctx_data.get("source_anchors", {}).get("design_notes", [])
         if dn_anchors:
@@ -869,7 +873,9 @@ def assemble_docs(project_dir: str, ctx_dir: str,
         lines.append("")
 
         lines.append(f"## Disclosure Hint [{badge}]")
-        hint = ctx_data.get("disclosure_hint", "*Not yet generated.*")
+        hint = ctx_data.get("disclosure_hint", "")
+        if not hint or hint in ("UNKNOWN", "?", ""):
+            hint = "*Not yet generated.*"
         lines.append(f"> {hint}")
         lines.append("")
 
